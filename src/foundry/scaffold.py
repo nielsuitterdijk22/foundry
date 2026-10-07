@@ -822,8 +822,7 @@ def adopt_repo(cfg, s: Session, repo: Path):
     if git.dirty(repo):  # nothing to commit when resuming after a failed push
         git.git(repo, "commit", "-m", "foundry: adopt — mission, features, stories, backlog, ./check")
     git.ensure_deploy_key(cfg, slug)
-    main = git.default_branch(repo)
-    git.remote_op(cfg, repo, "push", f"{main}:{main}")
+    git.push(cfg, repo, git.default_branch(repo))
     say(f"Pushed foundry files to https://github.com/{slug}", "h")
 
 
@@ -907,7 +906,7 @@ def cto(cfg: dict, args: list[str]) -> int:
                     create_repo(cfg, p, r)
             except (Skip, SystemExit, Exception) as e:  # noqa: BLE001
                 # Never stop the whole suite for one product: note it, carry on, retry next time.
-                reason = str(e).strip().split("\n")[0] or type(e).__name__
+                reason = _reason(e)
                 if not isinstance(e, (Skip, SystemExit, RuntimeError, subprocess.CalledProcessError)):
                     log = config.state_dir(cfg, "logs", r.name.lower()) / "cto-error.log"
                     log.write_text(traceback.format_exc())
@@ -959,6 +958,18 @@ def _locate(cfg, owner: str, name: str):
         sys.exit(f"{repo} has files but isn't a git checkout of {owner}/{name} — move it aside first")
     say(f"Cloning {owner}/{name} into {repo}", "dim")
     subprocess.run(["git", "clone", f"git@github.com:{owner}/{name}.git", str(repo)], check=True)  # SSH: no API
+
+
+def _reason(e: BaseException) -> str:
+    """One line for the owner: the message, plus the line that says what went wrong when the
+    first one is only a header (git's "git push failed:")."""
+    lines = [ln.strip() for ln in str(e).strip().splitlines() if ln.strip()]
+    if not lines:
+        return type(e).__name__
+    if lines[0].endswith(":") and len(lines) > 1:
+        detail = next((ln for ln in lines[1:] if ln.startswith(("!", "error", "fatal", "ERROR"))), lines[1])
+        return f"{lines[0]} {detail}"[:400]
+    return lines[0][:400]
 
 
 def _adopt_problem(repo: Path) -> str:
@@ -1044,8 +1055,7 @@ def _propagate(cfg, s: Session, adopted: list[str]):
         f.write_text(s["suite_md"].rstrip() + "\n")
         git.git(repo, "add", "SUITE.md")
         git.git(repo, "commit", "-m", "foundry: update SUITE.md")
-        main = git.default_branch(repo)
-        git.remote_op(cfg, repo, "push", f"{main}:{main}")
+        git.push(cfg, repo, git.default_branch(repo))
         say(f"Updated SUITE.md in {name}", "dim")
 
 

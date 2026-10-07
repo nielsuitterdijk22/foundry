@@ -235,7 +235,7 @@ class Loop:
             git.git(self.repo, "merge", "--ff-only", "FETCH_HEAD")
         except RuntimeError:
             raise Stop("local main and GitHub main have diverged; reconcile by hand") from None
-        git.remote_op(self.cfg, self.repo, "push", f"{self.main}:{self.main}")
+        git.push(self.cfg, self.repo, self.main)
 
     def _reset_to_main(self, branch: str | None = None):
         git.git(self.repo, "checkout", "-f", self.main)
@@ -262,7 +262,10 @@ class Loop:
     def _commit_main(self, msg: str, paths: list[str]):
         git.git(self.repo, "add", *paths)
         git.git(self.repo, "commit", "-m", msg)
-        git.remote_op(self.cfg, self.repo, "push", f"{self.main}:{self.main}")
+        try:
+            git.push(self.cfg, self.repo, self.main)
+        except RuntimeError as e:  # the commit stays local; the next _sync retries or reports it
+            raise Stop(str(e).strip().splitlines()[0]) from None
 
     # ---------- iterations ----------
 
@@ -485,11 +488,38 @@ class Suite:
     product moves; a task whose Needs (here or in another repo) aren't Done waits its turn."""
 
     def __init__(self, cfg, repos: list[Path], once=False, name: str | None = None):
-        self.cfg, self.once = cfg, once
+        self.cfg, self.once, self.name = cfg, once, name
         self.loops = [Loop(cfg, r) for r in repos]
         for lp in self.loops:
             lp.peers = [o.repo for o in self.loops if o is not lp]
         self.inbox = inbox.Inbox(cfg, name, self.loops) if name else None
+
+    def _joiners(self) -> list:
+        """Products `foundry cto` finished setting up after this run started join it."""
+        if not self.name:
+            return []
+        path = config.state_dir(self.cfg, "suites") / f"{self.name.lower()}.json"
+        adopted = json.loads(path.read_text()).get("adopted", []) if path.exists() else []
+        known = {lp.repo.name.lower() for lp in self.loops}
+        new = []
+        for name in adopted:
+            if name.lower() in known:
+                continue
+            lp = Loop(self.cfg, config.repo_path(self.cfg, name))
+            try:
+                lp._acquire_lock()
+                lp._preflight()
+            except (SystemExit, Stop) as e:
+                if lp.lock.exists() and lp.lock.read_text() == str(os.getpid()):
+                    lp.lock.unlink()
+                print(f"[foundry] {name} is set up but can't join the suite run yet: {e}", flush=True)
+                continue
+            print(f"[foundry] {name} joins the suite run", flush=True)
+            self.loops.append(lp)
+            for other in self.loops:
+                other.peers = [o.repo for o in self.loops if o is not other]
+            new.append(lp)
+        return new
 
     def triage_only(self) -> int:
         """Let the CTO handle the inbox now, without running tasks (no run is active)."""
@@ -516,8 +546,9 @@ class Suite:
                 held.append(lp)
             return self._run()
         finally:
-            for lp in held:
-                lp.lock.unlink(missing_ok=True)
+            for lp in {*held, *self.loops}:  # products that joined mid-run hold locks too
+                if lp.lock.exists() and lp.lock.read_text() == str(os.getpid()):
+                    lp.lock.unlink()
 
     def _run(self) -> int:
         caff = agent.keep_awake()
@@ -535,6 +566,7 @@ class Suite:
                     lp.stopped(f"skipped by the suite run: {e}")
             turn, urgent = 0, []
             while active:
+                active += self._joiners()
                 if self.inbox:  # the CTO's side channel, between tasks
                     urgent = [lp for lp in self.inbox.process() if lp in active] or urgent
                 order = active[turn % len(active):] + active[:turn % len(active)]

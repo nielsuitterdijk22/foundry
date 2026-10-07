@@ -17,6 +17,43 @@ WITH_DEMO = 8      # of those, how many show their demo output inline
 DEMO_CHARS = 2500  # demo output shown per entry (the tail, where results usually are)
 
 
+def status(cfg: dict, args: list[str]) -> int:
+    """foundry status: the showcase in the terminal (without demo output), plus what runs right now."""
+    import re
+    running = [_live(cfg, p) for p in config.state_dir(cfg, "locks").glob("*.lock")]
+    running = [r for r in running if r]
+    md = render(cfg, datetime.now())
+    md = re.sub(r"\n<details.*?</details>\n", "\n", md, flags=re.S)       # demo output: see the page
+    md = re.sub(r"(\n### [^\n]*\n[^\n]*\n)\n(?:(?!\n### )[\s\S])*?(?=\n### |\Z)", r"\1", md)  # one line per entry
+    md = re.sub(r"\[!\[check\]\([^)]*\)\]\([^)]*\)", "", md)           # badges don't render here
+    md = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", md)                    # links: keep the text
+    print(md.split("\n", 2)[2] if md.startswith("# ") else md)
+    print("## Running now\n" + ("\n".join(running) if running else "Nothing — start with `foundry run --suite <suite>`"))
+    url = ""
+    try:
+        if (config.state_dir(cfg, "showcase") / ".git").exists():
+            url = f"https://github.com/{slug(cfg)}"
+    except Exception:  # noqa: BLE001 — offline is fine
+        pass
+    print(f"\nFull page with demos: {url or '(not published yet)'} · local: {config.state_dir(cfg, 'showcase') / 'README.md'}")
+    return 0
+
+
+def _live(cfg, lock: Path) -> str:
+    import os
+    try:
+        pid = int(lock.read_text())
+        os.kill(pid, 0)
+    except (ValueError, ProcessLookupError, FileNotFoundError):
+        return ""
+    name = lock.stem
+    st_file = config.state_dir(cfg, "state") / f"{name}.json"
+    st = json.loads(st_file.read_text()) if st_file.exists() else {}
+    started = datetime.fromtimestamp(lock.stat().st_mtime)
+    doing = f"{st['task']} attempt {st.get('attempt', 1)}" if st.get("in_progress") else "between tasks"
+    return f"- {name}: {doing} (loop pid {pid}, since {started:%H:%M})"
+
+
 def publish(cfg: dict) -> None:
     try:
         d = config.state_dir(cfg, "showcase")
@@ -64,9 +101,17 @@ def _when(ts: str, now: datetime) -> str:
     return t.strftime("%Y-%m-%d %H:%M")
 
 
+def _now(cfg, name: str, bl) -> str:
+    st_file = config.state_dir(cfg, "state") / f"{name}.json"
+    st = json.loads(st_file.read_text()) if st_file.exists() else {}
+    if st.get("in_progress"):
+        return f"🔨 working on {st['task']} (attempt {st.get('attempt', 1)})"
+    return f"next up: {bl.todo[0].id}" if bl.todo else "plans next work"
+
+
 def _real(text: str | None) -> str:
     text = (text or "").strip()
-    return "" if text.lower() in ("", "none", "- none", "none.") else text
+    return "" if text.lower().lstrip("-* ").rstrip(".") in ("", "none", "n/a", "nothing") else text
 
 
 def render(cfg: dict, now: datetime) -> str:
@@ -91,8 +136,7 @@ def render(cfg: dict, now: datetime) -> str:
             if e.get("outcome") == "merged" and datetime.fromisoformat(e["ts"]) >= week and _real(e.get("questions")):
                 needs.append(f"- **{display}** {e['task']} asks: {_real(e['questions'])[:500]}")
         merged = [e for e in evs if e.get("outcome") == "merged"]
-        state = ("⏸ stopped" if last.get("outcome") == "stopped" else
-                 f"working on {bl.todo[0].id}" if bl.todo else "planning next work") if repo else "not set up"
+        state = ("⏸ stopped" if last.get("outcome") == "stopped" else _now(cfg, name, bl)) if repo else "not set up"
         rows.append(f"| {f'[{display}](https://github.com/{slug})' if slug else display} {_badge(repo, slug) if repo else ''} "
                     f"| {len(bl.sections['Done'])} | {len(bl.todo)} | {len(bl.sections['Parked'])} "
                     f"| {_when(merged[-1]['ts'], now) if merged else '—'} | {state} |")

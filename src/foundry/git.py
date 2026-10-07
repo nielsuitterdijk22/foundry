@@ -130,6 +130,23 @@ def remote_op(cfg: dict, repo: Path, *args: str) -> str:
     return r.stdout.strip()
 
 
+def push(cfg: dict, repo: Path, branch: str) -> None:
+    """Push branch to GitHub. If GitHub moved on meanwhile (an owner edit, a docs bot like GitBook),
+    replay foundry's commits on top and push again; a real conflict aborts and raises."""
+    try:
+        remote_op(cfg, repo, "push", f"{branch}:{branch}")
+        return
+    except RuntimeError as e:
+        if "fetch first" not in str(e) and "non-fast-forward" not in str(e):
+            raise
+    remote_op(cfg, repo, "fetch", branch)
+    r = subprocess.run(["git", *SAFE, "rebase", "FETCH_HEAD"], cwd=repo, capture_output=True, text=True)
+    if r.returncode != 0:
+        git(repo, "rebase", "--abort", check=False)
+        raise RuntimeError(f"GitHub's {branch} has commits that conflict with foundry's — reconcile {repo.name} by hand")
+    remote_op(cfg, repo, "push", f"{branch}:{branch}")
+
+
 def default_branch(repo: Path) -> str:
     """origin's default branch (main, master, ...), falling back to 'main'."""
     ref = git(repo, "symbolic-ref", "--short", "refs/remotes/origin/HEAD", check=False)

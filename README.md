@@ -13,6 +13,7 @@ foundry adopt <repo>      the same, for an existing repo
 foundry cto <suite> <repo>…  one interview for a suite of products; adopts or creates each repo
 foundry run <repo>        work the backlog unattended: tests first, ./check green, merge, push
 foundry run --suite <suite>  the same, one loop across the suite's repos
+foundry status            what needs you, product status, CTO inbox, latest work, what runs now
 foundry report <repo>     REPORT.md for your daily check-in
 foundry purge <name>      forget a paused scaffold/adopt session and start over
 foundry serve …           start / stop / restart / status the model server
@@ -170,6 +171,9 @@ Decisions show up in the showcase's "CTO inbox". An issue gets a reply comment a
 it's handled. `foundry tell <suite>` on its own lists the inbox.
 
 ## The showcase: checking in
+
+`foundry status` prints the same overview in the terminal (without demo output), plus what is
+running right now and a link to the full page.
 
 You don't need to watch the loops. After every iteration foundry regenerates the README of a
 private GitHub repo, `<owner>/foundry-showcase` (created on first use; name it in `[showcase]`).

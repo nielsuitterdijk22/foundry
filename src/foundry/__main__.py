@@ -22,6 +22,7 @@ USAGE = """usage: foundry <command> [args]
   purge suite <suite> [-y]          forget a suite (repos are left alone)
   run <repo>                        work the backlog unattended (Ctrl-C stops cleanly)
   run --suite <suite>               one loop across the suite's repos, respecting cross-repo Needs
+  status                            what needs you, product status, inbox, latest work, what runs now
   report <repo>                     write REPORT.md for the daily check-in
 """
 
@@ -57,6 +58,9 @@ def main() -> int:
     if cmd == "run":
         from . import run
         return run.main(cfg, rest)
+    if cmd == "status":
+        from . import showcase
+        return showcase.status(cfg, rest)
     if cmd == "report":
         from . import report
         return report.main(cfg, rest)

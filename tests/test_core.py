@@ -54,6 +54,35 @@ class GitRepo(unittest.TestCase):
         (self.repo / "new.txt").write_text("x")
         self.assertEqual(sorted(git.dirty(self.repo)), ["MISSION.md", "check", "new.txt"])
 
+    def test_push_replays_on_top_of_outside_commits(self):
+        remote, other = self.repo / "remote.git", self.repo.parent / (self.repo.name + "-other")
+        sh(self.repo, "git", "init", "-q", "--bare", "-b", "main", str(remote))
+        (self.repo / ".gitignore").write_text("remote.git/\n")
+        sh(self.repo, "git", "add", ".gitignore")
+        sh(self.repo, "git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "ignore")
+        sh(self.repo, "git", "remote", "add", "origin", str(remote))
+        sh(self.repo, "git", "push", "-q", "origin", "main")
+        sh(self.repo.parent, "git", "clone", "-q", str(remote), str(other))  # a docs bot, say
+        (other / "docs.md").write_text("docs\n")
+        sh(other, "git", "add", "docs.md")
+        sh(other, "git", "-c", "user.name=b", "-c", "user.email=b@b", "commit", "-qm", "GitBook: update")
+        sh(other, "git", "push", "-q", "origin", "main")
+        (self.repo / "BACKLOG.md").write_text("# Backlog\n")
+        sh(self.repo, "git", "add", "BACKLOG.md")
+        sh(self.repo, "git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "foundry: plan")
+        git.push({}, self.repo, "main")
+        log = subprocess.run(["git", "log", "--format=%s", "main"], cwd=remote, capture_output=True,
+                             text=True).stdout.split("\n")
+        self.assertEqual(log[:2], ["foundry: plan", "GitBook: update"])
+        import shutil
+        shutil.rmtree(other)
+
+    def test_skip_reason_keeps_the_detail(self):
+        e = RuntimeError("git push failed:\nTo github.com:me/Forge.git\n ! [rejected]        master -> master (fetch first)\n")
+        self.assertEqual(scaffold._reason(e), "git push failed: ! [rejected]        master -> master (fetch first)")
+        self.assertEqual(scaffold._reason(SystemExit("Atlas has 3 uncommitted change(s).\nCommit first.")),
+                         "Atlas has 3 uncommitted change(s).")
+
     def test_deleting_protected_file_rejected(self):
         (self.repo / "MISSION.md").unlink()
         self.assertFalse(self.inspect().ok)
@@ -155,6 +184,21 @@ class Suite(unittest.TestCase):
             tempo.next_task(backlog.load(tempo.repo))
         self.write("Quill", [], done=["T-001"])
         self.assertTrue(tempo.ready())
+
+    def test_set_up_products_join_a_running_suite(self):
+        from unittest import mock
+        sh(self.root, "git", "init", "-q", "-b", "main", "Forge")
+        s = scaffold.suite_state(self.cfg, "acme")
+        s["adopted"] = ["Quill", "Tempo"]
+        suite = run.Suite(self.cfg, [self.root / "Quill", self.root / "Tempo"], name="acme")
+        with mock.patch.object(run.Loop, "_preflight", lambda self: None):
+            self.assertEqual(suite._joiners(), [])
+            s["adopted"] = ["Quill", "Tempo", "Forge"]
+            (joined,) = suite._joiners()
+        self.assertEqual(joined.repo.name, "Forge")
+        self.assertEqual(sorted(p.name for p in suite.loops[0].peers), ["Forge", "Tempo"])
+        self.assertTrue(joined.lock.exists())
+        joined.lock.unlink()
 
     def test_suite_wires_peers(self):
         suite = run.Suite(self.cfg, [self.root / "Quill", self.root / "Tempo"])
