@@ -7,7 +7,6 @@ status, and the latest merged work with the real output of its demo. A local cop
 """
 
 import json
-import subprocess
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -132,9 +131,7 @@ def render(cfg: dict, now: datetime) -> str:
 
 
 def slug(cfg) -> str:
-    owner = cfg["github"]["owner"] or subprocess.run(
-        ["gh", "api", "user", "--jq", ".login"], check=True, capture_output=True, text=True).stdout.strip()
-    return f"{owner}/{(cfg.get('showcase') or {}).get('repo') or 'foundry-showcase'}"
+    return f"{git.login(cfg)}/{(cfg.get('showcase') or {}).get('repo') or 'foundry-showcase'}"
 
 
 def _overdue_thoughts(cfg, now) -> list[str]:
@@ -172,10 +169,11 @@ def _push(cfg, d: Path):
     """Commit README.md and push it to the showcase repo, creating that repo the first time."""
     if not (d / ".git").exists():
         slug_ = slug(cfg)
-        if subprocess.run(["gh", "repo", "view", slug_], capture_output=True).returncode != 0:
-            subprocess.run(["gh", "repo", "create", slug_, "--private",
-                            "--description", "What the foundry agents built lately (generated)"],
-                           check=True, capture_output=True)
+        try:
+            git.gh("repo", "view", slug_, "--json", "name", tries=1, timeout=20)
+        except git.NotFound:
+            git.gh("repo", "create", slug_, "--private",
+                   "--description", "What the foundry agents built lately (generated)", tries=1)
             print(f"[foundry] created https://github.com/{slug_} — your showcase", flush=True)
         git.git(d, "init", "-b", "main")
         git.git(d, "remote", "add", "origin", f"https://github.com/{slug_}.git")

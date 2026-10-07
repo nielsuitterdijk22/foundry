@@ -304,6 +304,87 @@ class Inbox(unittest.TestCase):
         self.assertRegex(md, r"- ⏳ \*\*low\*\* \(by \w+ \d+ \w+ \d\d:\d\d\) queued thought — _waiting for the CTO_")
 
 
+class GitHubFlaky(unittest.TestCase):
+    """git.gh against a fake gh: time limits, retries, and telling 'not found' from 'unreachable'."""
+
+    def setUp(self):
+        import os
+        from unittest import mock
+        self.tmp = tempfile.TemporaryDirectory()
+        self.bin = Path(self.tmp.name)
+        self.calls = self.bin / "calls"
+        self.env = mock.patch.dict(os.environ, {"PATH": f"{self.bin}:{os.environ['PATH']}",
+                                                "GH_CONFIG_DIR": str(self.bin / "ghconf")})
+        self.env.start()
+        self.sleep = mock.patch.object(git.time, "sleep", lambda s: None)
+        self.sleep.start()
+
+    def tearDown(self):
+        self.env.stop()
+        self.sleep.stop()
+        self.tmp.cleanup()
+
+    def fake(self, script: str):
+        gh = self.bin / "gh"
+        gh.write_text(f"#!/bin/sh\necho x >> {self.calls}\n{script}\n")
+        gh.chmod(0o755)
+
+    def ncalls(self):
+        return len(self.calls.read_text().splitlines()) if self.calls.exists() else 0
+
+    def test_hang_times_out_and_retries(self):
+        self.fake("exec sleep 5")
+        with self.assertRaises(git.GitHubUnavailable) as e:
+            git.gh("api", "user", timeout=1, tries=2)
+        self.assertIn("no answer within", str(e.exception))
+        self.assertEqual(self.ncalls(), 2)
+
+    def test_not_found_is_not_unavailable(self):
+        self.fake('echo "GraphQL: Could not resolve to a Repository with the name me/x." >&2; exit 1')
+        with self.assertRaises(git.NotFound):
+            git.gh("repo", "view", "me/x")
+        self.assertEqual(self.ncalls(), 1)
+
+    def test_server_error_retried_client_error_not(self):
+        self.fake('echo "HTTP 502: Bad Gateway" >&2; exit 1')
+        with self.assertRaises(git.GitHubUnavailable):
+            git.gh("api", "user", tries=3)
+        self.assertEqual(self.ncalls(), 3)
+        self.calls.unlink()
+        self.fake('echo "HTTP 422: Validation Failed" >&2; exit 1')
+        with self.assertRaises(RuntimeError) as e:
+            git.gh("repo", "create", "me/x")
+        self.assertNotIsInstance(e.exception, git.GitHubUnavailable)
+        self.assertEqual(self.ncalls(), 1)
+
+    def test_login_without_api(self):
+        self.fake("exec sleep 5")  # any API call would hang
+        (self.bin / "ghconf").mkdir()
+        (self.bin / "ghconf" / "hosts.yml").write_text(
+            "github.com:\n    git_protocol: ssh\n    users:\n        someone:\n    user: someone\n")
+        cfg = {"github": {"owner": ""}, "paths": {"state": self.bin / "state"}}
+        self.assertEqual(git.login(cfg), "someone")
+        self.assertEqual(self.ncalls(), 0)
+        (self.bin / "ghconf" / "hosts.yml").unlink()
+        self.assertEqual(git.login(cfg), "someone")  # cached
+        self.assertEqual(git.login({**cfg, "github": {"owner": "org"}}), "org")
+
+    def test_deploy_key_kept_aside_until_registered(self):
+        from unittest import mock
+        cfg = {"paths": {"state": self.bin / "state"}}
+
+        def down(*a, **k):
+            raise git.GitHubUnavailable("down")
+        with mock.patch.object(git, "gh", down), self.assertRaises(git.GitHubUnavailable):
+            git.ensure_deploy_key(cfg, "me/x")
+        key = git.key_path(cfg, "me/x")
+        self.assertFalse(key.exists())  # not final: the next run registers it again
+        self.assertTrue(key.with_name(key.name + ".new").exists())
+        with mock.patch.object(git, "gh", lambda *a, **k: ""):
+            self.assertEqual(git.ensure_deploy_key(cfg, "me/x"), key)
+        self.assertTrue(key.exists() and Path(f"{key}.pub").exists())
+
+
 class Interview(unittest.TestCase):
     def test_classify_replies(self):
         self.assertEqual(scaffold._classify("Who pays?"), ("question", "Who pays?"))

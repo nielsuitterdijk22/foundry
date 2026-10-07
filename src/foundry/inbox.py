@@ -16,11 +16,10 @@ showcase repo are thoughts too (label `high`/`low` for priority); the CTO answer
 
 import json
 import secrets
-import subprocess
 import sys
 from datetime import datetime, timedelta
 
-from . import backlog, config, scaffold, showcase
+from . import backlog, config, git, scaffold, showcase
 
 PRIOS = {"immediate": timedelta(0), "high": timedelta(days=1), "med": timedelta(days=3),
          "low": timedelta(days=14)}  # priority → how long the CTO may take to act
@@ -161,6 +160,11 @@ class Inbox:
         except Exception as e:  # noqa: BLE001 — GitHub being unreachable must not stop the run
             print(f"[foundry] inbox: issues not checked ({str(e).splitlines()[0] if str(e) else type(e).__name__})")
         st = load(self.cfg, self.suite)
+        for item in st["items"].values():  # issue replies that GitHub didn't take earlier
+            if item.get("decided") and item.get("source", "").startswith("issue#") and \
+                    item.get("answered") != f"{item['status']}|{item.get('revisit_when', '')}":
+                self._answer_issue(item)
+                self._save(st)
         urgent = []
         for item in self.due(st, planning, datetime.now()):
             urgent += self._triage(item)
@@ -265,15 +269,15 @@ class Inbox:
     # ---------- GitHub issues on the showcase repo
 
     def _import_issues(self):
-        slug = showcase.slug(self.cfg)
-        r = subprocess.run(["gh", "issue", "list", "-R", slug, "--state", "open", "--limit", "50",
-                            "--json", "number,title,body,labels"], capture_output=True, text=True, timeout=60)
-        if r.returncode != 0:
-            return  # no showcase repo yet, or offline
+        try:  # one quick try: between tasks, never hold the loop up for GitHub
+            out = git.gh("issue", "list", "-R", showcase.slug(self.cfg), "--state", "open", "--limit", "50",
+                         "--json", "number,title,body,labels", tries=1, timeout=20)
+        except git.NotFound:
+            return  # no showcase repo yet
         st_file = _paths(self.cfg, self.suite)[1]
         st = json.loads(st_file.read_text()) if st_file.exists() else {"items": {}, "issues": []}
         only = len(suites(self.cfg)) == 1
-        for iss in json.loads(r.stdout):
+        for iss in json.loads(out):
             labels = {lb["name"].lower() for lb in iss["labels"]}
             if iss["number"] in st["issues"]:
                 continue
@@ -297,11 +301,15 @@ class Inbox:
             body += "\n\n" + "\n".join(f"- {d}" for d in item["did"])
         if item["status"] == "deferred":
             body += f"\n\nRevisiting when: {item.get('revisit_when', '')}"
-        num, slug = item["source"].removeprefix("issue#"), showcase.slug(self.cfg)
-        cmd = ["close", num, "-R", slug, "-c", body] if item["status"] in ("done", "dropped") else \
-              ["comment", num, "-R", slug, "-b", body]
-        if subprocess.run(["gh", "issue", *cmd], capture_output=True, timeout=60).returncode == 0:
+        num = item["source"].removeprefix("issue#")
+        try:
+            slug = showcase.slug(self.cfg)
+            cmd = ["close", num, "-R", slug, "-c", body] if item["status"] in ("done", "dropped") else \
+                  ["comment", num, "-R", slug, "-b", body]
+            git.gh("issue", *cmd, tries=1, timeout=20)
             item["answered"] = said
+        except RuntimeError:
+            pass  # answered at a later boundary (see process)
 
 
 def _left(d: timedelta) -> str:

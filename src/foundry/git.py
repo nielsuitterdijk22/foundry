@@ -3,6 +3,7 @@
 import os
 import re
 import subprocess
+import time
 from pathlib import Path
 
 from . import config
@@ -27,19 +28,74 @@ def slug(repo: Path) -> str:
     return f"{m.group(1)}/{m.group(2)}"
 
 
+class GitHubUnavailable(RuntimeError):
+    """GitHub's API didn't answer (it is often slow or flaky); the work is retried later."""
+
+
+class NotFound(RuntimeError):
+    pass
+
+
+def gh(*args: str, timeout: float = 45, tries: int = 3) -> str:
+    """Run a gh command with a time limit, retrying when GitHub doesn't answer or errors on its side.
+    Raises NotFound for a 404, GitHubUnavailable when it never answered, RuntimeError otherwise.
+    Commands that change something on GitHub should pass tries=1 and check state on the next run."""
+    last = ""
+    for i in range(tries):
+        try:
+            r = subprocess.run(["gh", *args], capture_output=True, text=True, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            last = f"no answer within {timeout:.0f}s"
+        else:
+            if r.returncode == 0:
+                return r.stdout.strip()
+            err = r.stderr.strip()
+            if "HTTP 404" in err or "Could not resolve to a Repository" in err:
+                raise NotFound(err)
+            if re.search(r"HTTP 4(?!29)\d\d", err):
+                raise RuntimeError(f"gh {' '.join(args[:2])} failed: {err.splitlines()[-1]}")
+            last = err.splitlines()[-1] if err else f"exit status {r.returncode}"
+        if i < tries - 1:
+            time.sleep(5 * (i + 1))
+    raise GitHubUnavailable(f"GitHub API unreachable (gh {' '.join(args[:2])}: {last}) — will retry later")
+
+
+def login(cfg: dict) -> str:
+    """The GitHub account foundry works as, without an API call when it can: github.owner,
+    then a cached answer, then gh's own hosts.yml, and only then the API."""
+    if cfg["github"]["owner"]:
+        return cfg["github"]["owner"]
+    cache = config.state_dir(cfg) / "gh-login"
+    if cache.exists() and cache.read_text().strip():
+        return cache.read_text().strip()
+    hosts = Path(os.environ.get("GH_CONFIG_DIR", Path.home() / ".config" / "gh")) / "hosts.yml"
+    m = re.search(r"^github\.com:\n(?:[ \t].*\n)*?[ \t]+user:[ \t]*(\S+)", hosts.read_text() if hosts.exists() else "", re.M)
+    name = m.group(1) if m else gh("api", "user", "--jq", ".login")
+    cache.write_text(name)
+    return name
+
+
 def key_path(cfg: dict, slug_: str) -> Path:
     return config.state_dir(cfg, "keys") / slug_.replace("/", "__")
 
 
 def ensure_deploy_key(cfg: dict, slug_: str) -> Path:
-    """Create an ed25519 key for this repo and register it as a write deploy key."""
+    """Create an ed25519 key for this repo and register it as a write deploy key. The key only
+    takes its final name once GitHub has accepted it, so a failed registration is retried."""
     key = key_path(cfg, slug_)
     if key.exists():
         return key
-    subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", f"foundry {slug_}",
-                    "-f", str(key)], check=True)
-    subprocess.run(["gh", "repo", "deploy-key", "add", f"{key}.pub", "--repo", slug_,
-                    "--allow-write", "--title", "foundry"], check=True)
+    new = key.with_name(key.name + ".new")
+    if not new.exists():
+        subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", f"foundry {slug_}",
+                        "-f", str(new)], check=True)
+    try:
+        gh("repo", "deploy-key", "add", f"{new}.pub", "--repo", slug_, "--allow-write", "--title", "foundry", tries=1)
+    except RuntimeError as e:
+        if "key is already in use" not in str(e):  # registered by an attempt that timed out client-side
+            raise
+    Path(f"{new}.pub").rename(f"{key}.pub")
+    new.rename(key)
     return key
 
 
@@ -47,8 +103,7 @@ def _known_hosts(cfg: dict) -> Path:
     """GitHub's SSH host keys from its API (via gh), kept separate from ~/.ssh."""
     path = config.state_dir(cfg) / "known_hosts"
     if not path.exists():
-        keys = subprocess.run(["gh", "api", "meta", "--jq", ".ssh_keys[]"], check=True,
-                              text=True, capture_output=True).stdout.split("\n")
+        keys = gh("api", "meta", "--jq", ".ssh_keys[]").split("\n")
         path.write_text("".join(f"github.com {k}\n" for k in keys if k))
     return path
 

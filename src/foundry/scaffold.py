@@ -646,8 +646,7 @@ def make_backlog(cfg, s: Session, seed: str, peers: str = ""):
 # ---------------------------------------------------------------- writing files
 
 def _owner(cfg) -> str:
-    return cfg["github"]["owner"] or subprocess.run(
-        ["gh", "api", "user", "--jq", ".login"], check=True, capture_output=True, text=True).stdout.strip()
+    return git.login(cfg)
 
 
 def _write_docs(s: Session, repo: Path):
@@ -684,12 +683,12 @@ def create_repo(cfg, s: Session, repo: Path):
         if not yes("Scaffold into it? Existing files are kept and committed.", default=False):
             raise KeyboardInterrupt
     say(f"\nCreating {'private' if cfg['github']['private'] else 'public'} repo {slug} in {repo}", "h")
-    exists = subprocess.run(["gh", "repo", "view", slug], capture_output=True).returncode == 0
-    if not exists:
+    try:
+        git.gh("repo", "view", slug, "--json", "name")
+    except git.NotFound:  # only a real 404 means "create it"; an unreachable API raises and is retried
         mission_line = s["mission_md"].split("\n\n")[1].strip().replace("\n", " ")[:300]
-        subprocess.run(["gh", "repo", "create", slug,
-                        "--private" if cfg["github"]["private"] else "--public",
-                        "--description", mission_line], check=True)
+        git.gh("repo", "create", slug, "--private" if cfg["github"]["private"] else "--public",
+               "--description", mission_line, tries=1)
     repo.mkdir(parents=True, exist_ok=True)
     if not (repo / ".git").exists():
         git.git(repo, "init", "-b", "main")
@@ -858,9 +857,11 @@ def cto(cfg: dict, args: list[str]) -> int:
             legacy.discard()
     if not serve.healthy(cfg):
         sys.exit("model server is not running — `foundry serve start`")
-    owner = _owner(cfg)
     for name in new:
-        _locate(cfg, owner, name)
+        try:
+            _locate(cfg, _owner(cfg), name)
+        except git.GitHubUnavailable as e:
+            say(f"{name}: couldn't check GitHub yet ({e}); retried when its turn comes", "w")
     if new:
         s["repos"] = [*known, *new]
         if s["suite_md"]:  # growing a defined suite: reopen the interview for the newcomers
@@ -884,12 +885,15 @@ def cto(cfg: dict, args: list[str]) -> int:
         for r in repos:
             if r.name in adopted:
                 continue
-            exists = (r / ".git").exists()
-            say(f"\n================ {r.name} ({'adopt' if exists else 'new repo'})", "h")
-            p = Session(cfg, r.name, "adopt" if exists else "scaffold")
-            p.auto = "--review" not in args
-            p["suite_md"] = s["suite_md"]
+            say(f"\n================ {r.name}", "h")
             try:
+                if not (r / ".git").exists():
+                    _locate(cfg, _owner(cfg), r.name)  # GitHub may have been unreachable at the start
+                    seeds[r.name] = _seed(r, budget=7000) if (r / ".git").exists() else ""
+                exists = (r / ".git").exists()
+                p = Session(cfg, r.name, "adopt" if exists else "scaffold")
+                p.auto = "--review" not in args
+                p["suite_md"] = s["suite_md"]
                 product_mission(cfg, s, p, r.name, seeds[r.name])
                 features(cfg, p, seeds[r.name])
                 stories(cfg, p, seeds[r.name])
@@ -944,17 +948,17 @@ def _locate(cfg, owner: str, name: str):
     repo = config.repo_path(cfg, name)
     if (repo / ".git").exists():
         return
-    r = subprocess.run(["gh", "repo", "view", f"{owner}/{name}", "--json", "name", "--jq", ".name"],
-                       capture_output=True, text=True)
-    if r.returncode != 0:
+    try:
+        actual = git.gh("repo", "view", f"{owner}/{name}", "--json", "name", "--jq", ".name")
+    except git.NotFound:
         say(f"{name}: no repository yet — the CTO will create {owner}/{name}", "dim")
         return
-    if r.stdout.strip().lower() != name.lower():
-        sys.exit(f"{owner}/{name} was renamed to {r.stdout.strip()} on GitHub — use that name")
+    if actual.lower() != name.lower():
+        sys.exit(f"{owner}/{name} was renamed to {actual} on GitHub — use that name")
     if repo.exists() and any(p.name != ".DS_Store" for p in repo.iterdir()):
         sys.exit(f"{repo} has files but isn't a git checkout of {owner}/{name} — move it aside first")
     say(f"Cloning {owner}/{name} into {repo}", "dim")
-    subprocess.run(["gh", "repo", "clone", f"{owner}/{name}", str(repo)], check=True)
+    subprocess.run(["git", "clone", f"git@github.com:{owner}/{name}.git", str(repo)], check=True)  # SSH: no API
 
 
 def _adopt_problem(repo: Path) -> str:
