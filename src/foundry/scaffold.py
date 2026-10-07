@@ -463,9 +463,9 @@ def _adopt_preflight(repo: Path):
     if dirty:
         sys.exit(f"{repo.name} has {len(dirty)} uncommitted change(s), e.g. {', '.join(dirty[:5])}.\n"
                  "Commit or stash them first — foundry never touches uncommitted work.")
-    branch = git.git(repo, "rev-parse", "--abbrev-ref", "HEAD")
-    if branch != "main":
-        sys.exit(f"{repo.name} is on '{branch}'; foundry works on 'main'. Check out main first.")
+    branch, main = git.git(repo, "rev-parse", "--abbrev-ref", "HEAD"), git.default_branch(repo)
+    if branch != main:
+        sys.exit(f"{repo.name} is on '{branch}'; foundry works on '{main}'. Check out {main} first.")
     git.slug(repo)  # must be a GitHub repo
 
 
@@ -537,5 +537,6 @@ def adopt_repo(cfg, s: Session, repo: Path):
     git.git(repo, "add", "-A")
     git.git(repo, "commit", "-m", "foundry: adopt — mission, features, stories, backlog, ./check")
     git.ensure_deploy_key(cfg, slug)
-    git.remote_op(cfg, repo, "push", "main:main")
+    main = git.default_branch(repo)
+    git.remote_op(cfg, repo, "push", f"{main}:{main}")
     say(f"Pushed foundry files to https://github.com/{slug}", "h")

@@ -86,7 +86,7 @@ class Loop:
         self.metrics = config.state_dir(cfg, "metrics") / f"{self.name}.jsonl"
         self.logs = config.state_dir(cfg, "logs", self.name)
         self.lock = config.state_dir(cfg, "locks") / f"{self.name}.lock"
-        self.stopping = False
+        self.main = git.default_branch(repo)
 
     # ---------- lifecycle ----------
 
@@ -129,8 +129,8 @@ class Loop:
             print(f"[foundry] recovering from interrupted attempt on {st['task']}")
             self._abort_attempt(count=True)
         branch = git.git(self.repo, "rev-parse", "--abbrev-ref", "HEAD")
-        if branch != "main":
-            raise Stop(f"{self.name} is on branch {branch}; switch to main first")
+        if branch != self.main:
+            raise Stop(f"{self.name} is on branch {branch}; switch to {self.main} first")
         self._ensure_gitignore()
 
     # ---------- state ----------
@@ -164,15 +164,15 @@ class Loop:
             git.git(self.repo, "commit", "-m", "feedback: owner check-in")
         elif dirty:
             raise Stop(f"uncommitted changes in {self.name}: {', '.join(dirty[:5])} — commit or stash them")
-        git.remote_op(self.cfg, self.repo, "fetch", "main")
+        git.remote_op(self.cfg, self.repo, "fetch", self.main)
         try:
             git.git(self.repo, "merge", "--ff-only", "FETCH_HEAD")
         except RuntimeError:
             raise Stop("local main and GitHub main have diverged; reconcile by hand") from None
-        git.remote_op(self.cfg, self.repo, "push", "main:main")
+        git.remote_op(self.cfg, self.repo, "push", f"{self.main}:{self.main}")
 
     def _reset_to_main(self, branch: str | None = None):
-        git.git(self.repo, "checkout", "-f", "main")
+        git.git(self.repo, "checkout", "-f", self.main)
         git.git(self.repo, "clean", "-fd", "-e", ".foundry/")
         if branch:
             git.git(self.repo, "branch", "-D", branch, check=False)
@@ -196,7 +196,7 @@ class Loop:
     def _commit_main(self, msg: str, paths: list[str]):
         git.git(self.repo, "add", *paths)
         git.git(self.repo, "commit", "-m", msg)
-        git.remote_op(self.cfg, self.repo, "push", "main:main")
+        git.remote_op(self.cfg, self.repo, "push", f"{self.main}:{self.main}")
 
     # ---------- iterations ----------
 
@@ -217,7 +217,7 @@ class Loop:
         n, max_n = st["attempt"], self.cfg["run"]["max_attempts"]
         print(f"[foundry] {task.id} attempt {n}/{max_n}: {task.title}", flush=True)
 
-        git.git(self.repo, "checkout", "-B", st["branch"], "main")
+        git.git(self.repo, "checkout", "-B", st["branch"], self.main)
         work = self.repo / ".foundry"
         work.mkdir(exist_ok=True)
         (work / "summary.md").unlink(missing_ok=True)
@@ -234,10 +234,10 @@ class Loop:
                         timeout_min=self.cfg["run"]["task_timeout"],
                         token_budget=self.cfg["run"]["task_token_budget"])
         summary = (work / "summary.md").read_text() if (work / "summary.md").exists() else ""
-        git.git(self.repo, "checkout", "main", "--", *[p for p in LOOP_OWNED if (self.repo / p).exists()])
+        git.git(self.repo, "checkout", self.main, "--", *[p for p in LOOP_OWNED if (self.repo / p).exists()])
 
-        verdict = guards.inspect(self.repo, "main", self.cfg["run"]["protected"], task.tests_may_change)
-        changed = git.changed_files(self.repo, "main")
+        verdict = guards.inspect(self.repo, self.main, self.cfg["run"]["protected"], task.tests_may_change)
+        changed = git.changed_files(self.repo, self.main)
         failure, check_tail = "", ""
         if res.stopped in ("timeout", "tokens"):
             failure = f"stopped: {res.stopped} cap hit"
@@ -274,7 +274,7 @@ class Loop:
         git.git(self.repo, "add", "-A", "--", ".", ":!.foundry")
         body = _section(summary, "Done") or res.final_text[:1000]
         git.git(self.repo, "commit", "-m", f"{task.id}: {task.title}\n\n{body}")
-        git.git(self.repo, "checkout", "main")
+        git.git(self.repo, "checkout", self.main)
         git.git(self.repo, "merge", "--no-ff", st["branch"], "-m", f"Merge {task.id}: {task.title}")
         sha = git.git(self.repo, "rev-parse", "--short", "HEAD")
         git.git(self.repo, "branch", "-D", st["branch"])

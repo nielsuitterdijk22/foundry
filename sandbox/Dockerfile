@@ -20,10 +20,9 @@ RUN curl -fsSL https://sh.rustup.rs | CARGO_HOME=/usr/local/cargo sh -s -- -y --
       --profile minimal --component rustfmt,clippy \
  && chmod -R a+rwX /usr/local/rustup /usr/local/cargo
 
-# Go linters
-RUN GOBIN=/usr/local/bin go install honnef.co/go/tools/cmd/staticcheck@latest \
- && GOBIN=/usr/local/bin go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest \
- && go clean -cache -modcache
+# Go linter (prebuilt; includes staticcheck)
+ARG GOLANGCI_LINT_VERSION=v2.14.0
+RUN curl -sSfL https://golangci-lint.run/install.sh | sh -s -- -b /usr/local/bin ${GOLANGCI_LINT_VERSION}
 
 # OpenCode (pinned; bump together with the host version)
 ARG OPENCODE_VERSION=1.18.20

@@ -71,6 +71,17 @@ def remote_op(cfg: dict, repo: Path, *args: str) -> str:
     return r.stdout.strip()
 
 
+def default_branch(repo: Path) -> str:
+    """origin's default branch (main, master, ...), falling back to 'main'."""
+    ref = git(repo, "symbolic-ref", "--short", "refs/remotes/origin/HEAD", check=False)
+    if ref:
+        return ref.split("/", 1)[1]
+    for b in ("main", "master"):
+        if git(repo, "rev-parse", "--verify", "--quiet", f"refs/heads/{b}", check=False):
+            return b
+    return "main"
+
+
 def dirty(repo: Path) -> list[str]:
     """Changed or untracked paths (porcelain), ignoring .foundry/."""
     out = git(repo, "status", "--porcelain", "--untracked-files=all")
