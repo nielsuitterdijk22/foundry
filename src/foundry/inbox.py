@@ -15,7 +15,9 @@ showcase repo are thoughts too (label `high`/`low` for priority); the CTO answer
 """
 
 import json
+import os
 import secrets
+import subprocess
 import sys
 from datetime import datetime, timedelta
 
@@ -120,12 +122,28 @@ def tell(cfg: dict, args: list[str]) -> int:
     if any(scaffold._run_active(cfg, n) for n in members):
         print(f"Noted ({prio}). The CTO picks it up between tasks of the running suite.")
         return 0
-    from . import run, serve
+    from . import serve
     if not members or not serve.healthy(cfg):
         print(f"Noted ({prio}). The CTO picks it up when `foundry run --suite {suite}` runs.")
         return 0
-    print(f"Noted ({prio}). No run is active, so the CTO looks at it now.")
-    return run.Suite(cfg, [config.repo_path(cfg, n) for n in members], name=suite).triage_only()
+    log = config.state_dir(cfg, "logs") / f"triage-{suite.lower()}.log"
+    with open(log, "a") as out:  # think in the background: telling returns at once
+        subprocess.Popen([sys.executable, "-m", "foundry", "triage", suite], stdout=out, stderr=out,
+                         stdin=subprocess.DEVNULL, start_new_session=True, cwd=config.ROOT,
+                         env={**os.environ, "PYTHONPATH": str(config.ROOT / "src")})
+    print(f"Noted ({prio}). No run is active, so the CTO is looking at it now in the background "
+          f"(`foundry tell {suite}` shows the outcome; log: {log}).")
+    return 0
+
+
+def triage(cfg: dict, args: list[str]) -> int:
+    """foundry triage <suite> (started by tell): handle the inbox once, without running tasks."""
+    from . import run
+    members = scaffold.suite_state(cfg, args[0])["adopted"] or []
+    if any(scaffold._run_active(cfg, n) for n in members):
+        return 0  # a run started meanwhile; it handles the inbox itself
+    print(f"--- {datetime.now():%Y-%m-%d %H:%M:%S} triage", flush=True)
+    return run.Suite(cfg, [config.repo_path(cfg, n) for n in members], name=args[0]).triage_only()
 
 
 # ---------------------------------------------------------------- triage (inside the suite run)

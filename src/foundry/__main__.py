@@ -48,6 +48,9 @@ def main() -> int:
     if cmd == "tell":
         from . import inbox
         return inbox.tell(cfg, rest)
+    if cmd == "triage":  # internal: tell runs it in the background
+        from . import inbox
+        return inbox.triage(cfg, rest)
     if cmd == "purge":
         from . import scaffold
         return scaffold.purge(cfg, rest)

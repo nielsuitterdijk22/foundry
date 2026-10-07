@@ -291,6 +291,18 @@ class Inbox(unittest.TestCase):
         self.assertIn("can't apply 'task' to product 'Nope'", items[1]["revisit_when"])
         self.assertEqual(self.commits, [])
 
+    def test_tell_returns_at_once_and_triages_in_background(self):
+        from unittest import mock
+        started = []
+        with mock.patch("foundry.serve.healthy", lambda cfg: True), \
+                mock.patch.object(inbox.subprocess, "Popen", lambda argv, **kw: started.append((argv, kw))):
+            self.assertEqual(inbox.tell(self.cfg, ["acme", "--high", "ship", "it"]), 0)
+        (it,) = inbox.load(self.cfg, "acme")["items"].values()
+        self.assertEqual((it["text"], it["prio"], it["status"]), ("ship it", "high", "queued"))
+        (argv, kw), = started
+        self.assertEqual(argv[1:], ["-m", "foundry", "triage", "acme"])
+        self.assertTrue(kw["start_new_session"])
+
     def test_owner_notes_newest_first(self):
         md = inbox._add_owner_note("# Suite\n", "one")
         md = inbox._add_owner_note(md, "two")

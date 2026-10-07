@@ -160,13 +160,17 @@ class Loop:
             self.lock.unlink(missing_ok=True)
         return 0
 
-    def _acquire_lock(self):
-        if self.lock.exists():
+    def _acquire_lock(self, wait: float = 0):
+        """Take the repo's lock; with wait, give a holder (e.g. a short CTO triage) that long to finish."""
+        give_up = time.time() + wait
+        while self.lock.exists():
             try:
                 os.kill(int(self.lock.read_text()), 0)
+            except (ProcessLookupError, ValueError, FileNotFoundError):
+                break  # stale lock from a crash, or released just now
+            if time.time() >= give_up:
                 sys.exit(f"another foundry run is active for {self.name} (pid {self.lock.read_text()})")
-            except (ProcessLookupError, ValueError):
-                pass  # stale lock from a crash
+            time.sleep(5)
         self.lock.write_text(str(os.getpid()))
 
     def _preflight(self):
@@ -494,7 +498,10 @@ class Suite:
             for lp in self.loops:
                 lp._acquire_lock()
                 held.append(lp)
-            self.inbox.process()
+            for _ in range(5):  # thoughts told while the CTO was thinking get handled too
+                self.inbox.process()
+                if not any(it["status"] == "queued" for it in inbox.load(self.cfg, self.inbox.suite)["items"].values()):
+                    break
             showcase.publish(self.cfg)
         finally:
             for lp in held:
@@ -505,7 +512,7 @@ class Suite:
         held = []
         try:
             for lp in self.loops:
-                lp._acquire_lock()
+                lp._acquire_lock(wait=600)
                 held.append(lp)
             return self._run()
         finally:
