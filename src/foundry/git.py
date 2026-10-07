@@ -95,7 +95,7 @@ def dirty(repo: Path) -> list[str]:
 
 def changed_files(repo: Path, base: str) -> list[tuple[str, str]]:
     """(status, path) for the working tree (incl. untracked) vs `base`."""
-    git(repo, "add", "-A", "--", ".", ":!.foundry")
+    git(repo, "add", "-A")  # .foundry/ is gitignored
     out = git(repo, "diff", "--cached", "--name-status", "--no-renames", base)
     return [tuple(line.split("\t", 1)) for line in out.splitlines()]
 

@@ -11,13 +11,13 @@ id = "lmstudio-community/Qwen3.8-27B-MLX-4bit"
 context = 131072                   # tokens OpenCode may use (model supports 262144)
 max_output = 8192                  # max tokens per response; caps runaway generations, which
                                    # can also crash mlx-lm (Metal buffer-count limit, mlx-lm#1662)
-thinking = true                    # Qwen thinking mode (slower, better at agentic work)
+thinking = false                   # Qwen thinking mode. See README: on this hardware, off works better
 
-# Sampling. Qwen3.8 recommends these for thinking mode; for thinking=false use
-# temperature=0.7, top_p=0.8.
+# Sampling. Qwen3.8 recommends these for non-thinking mode; for thinking=true use
+# temperature=1.0, top_p=0.95.
 [model.sampling]
-temperature = 1.0
-top_p = 0.95
+temperature = 0.7
+top_p = 0.8
 top_k = 20
 min_p = 0.0
 

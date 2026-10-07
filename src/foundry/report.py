@@ -8,18 +8,26 @@ from datetime import datetime, timedelta
 from . import backlog, config, git, llm, serve
 
 DEMO_PROMPT = """Write a short "How to run and demo" section (markdown, no heading) for the owner of this
-project, based on its README, check script and recently merged work. Give exact shell
-commands, in order, from a fresh clone, and say what they should see. 10-20 lines.
+project: exact shell commands, in order, from a fresh clone, and what they should see. 8-20 lines.
+
+Strict rules: use ONLY commands, functions, flags and files that appear in the material below.
+Never invent APIs or example code. If the product cannot be run end to end yet, say so in one
+line, then show how to run ./check and which test names prove the merged work.
+
+MISSION workflows and examples:
+{mission}
 
 README.md:
 {readme}
 
-./check:
-{check}
+Entry points:
+{entry}
 
-Recently merged:
-{merged}
+Merged in this period (diffs, truncated):
+{diffs}
 """
+
+ENTRY_POINTS = ("main.go", "cmd", "src/main.rs", "src/lib.rs", "package.json", "Makefile", "check")
 
 
 def main(cfg, args) -> int:
@@ -63,7 +71,7 @@ def main(cfg, args) -> int:
     bench = _last_bench()
     if bench:
         out.append(f"- Last bench ({bench['date']}): prefill {bench['prefill_tok_s']} tok/s, decode "
-                   f"{bench['decode_tok_s']} tok/s, task {bench['task']}\n")
+                   f"{bench['decode_tok_s']} tok/s, task {bench['task']} ({bench.get('hidden_tests', '?')} hidden tests)\n")
     out.append(f"- Backlog: {len(bl.todo)} todo · {len(bl.sections['Parked'])} parked · "
                f"{len(bl.sections['Done'])} done\n")
 
@@ -140,14 +148,25 @@ def _last_bench() -> dict | None:
 
 
 def _demo(cfg, repo, merged) -> str:
-    readme = (repo / "README.md").read_text()[:5000] if (repo / "README.md").exists() else ""
+    readme = (repo / "README.md").read_text()[:3000] if (repo / "README.md").exists() else ""
     if not serve.healthy(cfg):
         return "_(model server offline — see README.md)_\n\n" + readme[:1500]
-    check = (repo / "check").read_text()[:2000] if (repo / "check").exists() else ""
-    titles = "\n".join(f"- {m['task']}: {m['title']}" for m in merged) or "(none this period)"
+    mission = (repo / "MISSION.md").read_text() if (repo / "MISSION.md").exists() else ""
+    mission = mission[mission.find("## Core workflows"):mission.find("## Done looks like")][:2000]
+    entry = []
+    for name in ENTRY_POINTS:
+        p = repo / name
+        files = sorted(p.rglob("*.go"))[:3] if p.is_dir() else [p] if p.exists() else []
+        entry += [f"--- {f.relative_to(repo)}\n{f.read_text(errors='replace')[:1500]}" for f in files]
+    diffs = []
+    for m in merged:
+        d = git.git(repo, "show", "--stat", "-p", "--first-parent", "-m", m["sha"], check=False)
+        diffs.append(d[:3000])
     try:
-        return llm.ask(cfg, "You write precise, minimal developer docs.",
-                       [{"role": "user", "content": DEMO_PROMPT.format(readme=readme, check=check, merged=titles)}],
+        return llm.ask(cfg, "You write precise, minimal developer docs. You never invent APIs.",
+                       [{"role": "user", "content": DEMO_PROMPT.format(
+                           mission=mission, readme=readme, entry="\n".join(entry)[:5000],
+                           diffs="\n".join(diffs)[:9000] or "(nothing merged this period)")}],
                        thinking=False, temperature=0.3, max_tokens=1200, timeout=600)
     except Exception as e:  # report must still be written
         return f"_(could not generate: {e})_"

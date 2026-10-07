@@ -7,6 +7,7 @@
 
 import csv
 import random
+import re
 import shutil
 import subprocess
 import time
@@ -47,6 +48,7 @@ def main(cfg, args) -> int:
     git.git(work, "-c", "user.name=foundry", "-c", "user.email=foundry@localhost",
             "commit", "-q", "-m", "task")
     sandbox.ensure_proxy(cfg)
+    agent.keep_awake()
     print(f"agent task running in {work} (cap {cfg['run']['task_timeout']} min)...", flush=True)
     res = agent.run(cfg, work, PROMPT, name="foundry-bench", log=work / "agent.jsonl",
                     timeout_min=cfg["run"]["task_timeout"], token_budget=cfg["run"]["task_token_budget"])
@@ -57,16 +59,22 @@ def main(cfg, args) -> int:
     for f in (config.ROOT / "bench" / "hidden").iterdir():
         (work / "lru").mkdir(exist_ok=True)
         shutil.copy(f, work / "lru" / f.name)
-    argv = sandbox.run_cmd(cfg, work, ["bash", "-c", "go vet ./... && go test -race -count=1 ./..."],
+    argv = sandbox.run_cmd(cfg, work, ["bash", "-c", "go vet ./... && "
+                                       "go test -race -count=1 -v -run Hidden ./lru/"],
                            name="foundry-bench-check")
     r = subprocess.run(argv, capture_output=True, text=True)
-    passed = r.returncode == 0
-    (work / "hidden-tests.log").write_text(r.stdout + r.stderr)
+    out = r.stdout + r.stderr
+    (work / "hidden-tests.log").write_text(out)
+    total = len(re.findall(r"^func TestHidden", (config.ROOT / "bench" / "hidden" /
+                                                    "lru_hidden_test.go").read_text(), re.M))
+    hidden_passed = len(re.findall(r"--- PASS: TestHidden", out))
+    passed = r.returncode == 0 and hidden_passed == total
 
     row = {
         "date": datetime.now().isoformat(timespec="minutes"), "model": cfg["model"]["id"],
         "thinking": cfg["model"]["thinking"], "prefill_tok_s": round(prefill),
         "decode_tok_s": round(decode, 1), "task": "pass" if passed else "fail",
+        "hidden_tests": f"{hidden_passed}/{total}",
         "minutes": round(res.seconds / 60, 1), "steps": res.steps,
         "tokens_in": res.tokens_in, "tokens_out": res.tokens_out, "stopped": res.stopped or "-",
     }
@@ -77,9 +85,9 @@ def main(cfg, args) -> int:
         if new:
             w.writeheader()
         w.writerow(row)
-    print(f"task : {'PASS' if passed else 'FAIL'} in {row['minutes']} min, {res.steps} steps, "
+    print(f"task : {'PASS' if passed else 'FAIL'} ({hidden_passed}/{total} hidden tests) in {row['minutes']} min, {res.steps} steps, "
           f"{res.tokens_in:,} in / {res.tokens_out:,} out" + (f", stopped: {res.stopped}" if res.stopped else ""))
     if not passed:
-        print("\n".join((r.stdout + r.stderr).splitlines()[-15:]))
+        print("\n".join(out.splitlines()[-15:]))
     print(f"logged to {out}; workdir {work}")
     return 0 if passed else 1

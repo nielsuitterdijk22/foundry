@@ -1,3 +1,4 @@
+// Command {{name}} is the entry point; see MISSION.md.
 package main
 
 import "fmt"

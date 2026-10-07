@@ -7,7 +7,6 @@ on the host. The agent only edits files in the sandbox.
 import json
 import os
 import signal
-import subprocess
 import sys
 import time
 from datetime import datetime
@@ -92,7 +91,7 @@ class Loop:
 
     def run(self) -> int:
         self._acquire_lock()
-        caff = subprocess.Popen(["caffeinate", "-ims", "-w", str(os.getpid())])
+        caff = agent.keep_awake()
         signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
         try:
             self._preflight()
@@ -105,6 +104,10 @@ class Loop:
             self._abort_attempt(count=False)
         except Stop as e:
             print(f"[foundry] stopped: {e}")
+        except Exception:
+            # Unexpected bug: leave the repo on main, count the attempt, and surface the error.
+            self._abort_attempt(count=True)
+            raise
         finally:
             caff.terminate()
             self.lock.unlink(missing_ok=True)
@@ -295,7 +298,7 @@ class Loop:
             return
 
         # Green: commit on the branch, merge to main, bookkeeping, push.
-        git.git(self.repo, "add", "-A", "--", ".", ":!.foundry")
+        git.git(self.repo, "add", "-A")
         body = _section(summary, "Done") or res.final_text[:1000]
         git.git(self.repo, "commit", "-m", f"{task.id}: {task.title}\n\n{body}")
         git.git(self.repo, "checkout", self.main)

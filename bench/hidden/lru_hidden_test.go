@@ -1,20 +1,21 @@
-package lru
+package lru_test
 
 import (
+	"bench/lru"
 	"slices"
 	"sync"
 	"testing"
 	"time"
 )
 
-type clock struct{ t time.Time }
+type hiddenClock struct{ t time.Time }
 
-func (c *clock) now() time.Time          { return c.t }
-func (c *clock) add(d time.Duration)     { c.t = c.t.Add(d) }
-func newClock() *clock                   { return &clock{t: time.Unix(1_000_000, 0)} }
+func (c *hiddenClock) now() time.Time { return c.t }
+func (c *hiddenClock) add(d time.Duration) { c.t = c.t.Add(d) }
+func newHiddenClock() *hiddenClock { return &hiddenClock{t: time.Unix(1_000_000, 0)} }
 
 func TestHiddenBasic(t *testing.T) {
-	c := New[string, int](2, time.Minute, newClock().now)
+	c := lru.New[string, int](2, time.Minute, newHiddenClock().now)
 	c.Put("a", 1)
 	c.Put("b", 2)
 	if v, ok := c.Get("a"); !ok || v != 1 {
@@ -30,7 +31,7 @@ func TestHiddenBasic(t *testing.T) {
 }
 
 func TestHiddenOverwrite(t *testing.T) {
-	c := New[string, int](2, time.Minute, newClock().now)
+	c := lru.New[string, int](2, time.Minute, newHiddenClock().now)
 	c.Put("a", 1)
 	c.Put("a", 9)
 	if c.Len() != 1 {
@@ -42,8 +43,8 @@ func TestHiddenOverwrite(t *testing.T) {
 }
 
 func TestHiddenTTL(t *testing.T) {
-	clk := newClock()
-	c := New[string, int](3, time.Minute, clk.now)
+	clk := newHiddenClock()
+	c := lru.New[string, int](3, time.Minute, clk.now)
 	c.Put("a", 1)
 	clk.add(30 * time.Second)
 	c.Get("a") // recency only, not TTL
@@ -64,8 +65,8 @@ func TestHiddenTTL(t *testing.T) {
 }
 
 func TestHiddenEvictExpiredFirst(t *testing.T) {
-	clk := newClock()
-	c := New[string, int](2, time.Minute, clk.now)
+	clk := newHiddenClock()
+	c := lru.New[string, int](2, time.Minute, clk.now)
 	c.Put("old", 1)
 	clk.add(30 * time.Second)
 	c.Put("new", 2)
@@ -86,11 +87,11 @@ func TestHiddenPanicsOnZeroCapacity(t *testing.T) {
 			t.Fatal("New(0) should panic")
 		}
 	}()
-	New[int, int](0, time.Second, time.Now)
+	lru.New[int, int](0, time.Second, time.Now)
 }
 
 func TestHiddenConcurrent(t *testing.T) {
-	c := New[int, int](64, time.Hour, time.Now)
+	c := lru.New[int, int](64, time.Hour, time.Now)
 	var wg sync.WaitGroup
 	for g := range 8 {
 		wg.Add(1)

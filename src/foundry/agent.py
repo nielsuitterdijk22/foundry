@@ -1,6 +1,7 @@
 """Runs one headless OpenCode session in the sandbox, enforcing time and token caps."""
 
 import json
+import os
 import subprocess
 import threading
 import time
@@ -43,9 +44,16 @@ def run(cfg: dict, repo: Path, prompt: str, *, name: str, log: Path,
             res.stopped = reason
         sandbox.kill(name)
 
-    timer = threading.Timer(timeout_min * 60, stop, args=("timeout",))
-    timer.daemon = True
-    timer.start()
+    deadline = start + timeout_min * 60
+    done = threading.Event()
+
+    def watchdog() -> None:  # wall clock, so time asleep still counts
+        while not done.wait(5):
+            if time.time() > deadline:
+                stop("timeout")
+                return
+
+    threading.Thread(target=watchdog, daemon=True).start()
     texts = []
     try:
         with open(log, "a") as lf:
@@ -75,12 +83,17 @@ def run(cfg: dict, repo: Path, prompt: str, *, name: str, log: Path,
         proc.wait()
         raise
     finally:
-        timer.cancel()
+        done.set()
         res.seconds = time.time() - start
     if proc.returncode != 0 and not res.stopped:
         res.stopped = "error"
     res.final_text = texts[-1] if texts else ""
     return res
+
+
+def keep_awake() -> subprocess.Popen:
+    """caffeinate until this process exits: no idle/system sleep (lid-closed sleep still applies)."""
+    return subprocess.Popen(["caffeinate", "-ims", "-w", str(os.getpid())])
 
 
 def check(cfg: dict, repo: Path, *, name: str, log: Path) -> tuple[bool, str]:
