@@ -76,6 +76,7 @@ def render(cfg: dict, now: datetime) -> str:
     needs, rows, latest = [], [], []
     week = now - timedelta(days=7)
 
+    needs += _overdue_thoughts(cfg, now)
     for name, evs in events.items():
         display, repo, slug = info[name]
         last = evs[-1] if evs else {}
@@ -103,6 +104,7 @@ def render(cfg: dict, now: datetime) -> str:
            f"Updated {now:%Y-%m-%d %H:%M}. Agents keep working while you read this; "
            "write feedback in a product's FEEDBACK.md and the loop picks it up.\n",
            "\n## Needs you\n", *(f"{n}\n" for n in needs), "" if needs else "Nothing. 🎉\n",
+           *_inbox_section(cfg),
            "\n## Products\n",
            "| Product | Done | Todo | Parked | Last merge | Now |\n|---|---|---|---|---|---|\n",
            *(f"{r}\n" for r in rows),
@@ -129,21 +131,55 @@ def render(cfg: dict, now: datetime) -> str:
     return "".join(out)
 
 
+def slug(cfg) -> str:
+    owner = cfg["github"]["owner"] or subprocess.run(
+        ["gh", "api", "user", "--jq", ".login"], check=True, capture_output=True, text=True).stdout.strip()
+    return f"{owner}/{(cfg.get('showcase') or {}).get('repo') or 'foundry-showcase'}"
+
+
+def _overdue_thoughts(cfg, now) -> list[str]:
+    from . import inbox
+    return [f"- **CTO** hasn't acted on your {it['prio']} thought (due {inbox.deadline(it):%a %d %b %H:%M}): "
+            f"{it['text'][:200]}" + (f" — {it['revisit_when']}" if it.get("revisit_when") else "")
+            for suite in inbox.suites(cfg) for it in inbox.load(cfg, suite)["items"].values() if inbox.overdue(it, now)]
+
+
+def _inbox_section(cfg) -> list[str]:
+    from . import inbox  # inbox publishes through this module; import late to avoid a cycle
+    out = []
+    for suite in inbox.suites(cfg):
+        items = sorted(inbox.load(cfg, suite)["items"].values(), key=lambda i: i["ts"], reverse=True)
+        if not items:
+            continue
+        out.append(f"\n## CTO inbox — {suite}\n")
+        for it in [i for i in items if i["status"] in ("queued", "pending", "deferred")]:
+            wait = (f"deferred: revisit when {it.get('revisit_when', '')}" if it["status"] == "deferred"
+                    else "waiting for the CTO")
+            mark = "🔴 overdue" if inbox.overdue(it, datetime.now()) else f"by {inbox.deadline(it):%a %d %b %H:%M}"
+            out.append(f"- ⏳ **{it['prio']}** ({mark}) {it['text'][:200]} — _{wait}_\n")
+        for it in [i for i in items if i["status"] in ("done", "dropped")][:8]:
+            did = "; ".join(it.get("did") or [])
+            out.append(f"- {'✅' if it['status'] == 'done' else '➖'} {it['text'][:200]} — {it.get('why', '')}"
+                       + (f" → {did}" if did else "") + "\n")
+    if out:
+        out.append("\nTell the CTO something: `foundry tell <suite> [--now|--high|--med|--low] \"...\"` "
+                   "(act now / within 1 day / 3 days / 2 weeks), or open an issue here with label "
+                   "`immediate`, `high`, `med` or `low` (none = med).\n")
+    return out
+
+
 def _push(cfg, d: Path):
     """Commit README.md and push it to the showcase repo, creating that repo the first time."""
-    name = (cfg.get("showcase") or {}).get("repo") or "foundry-showcase"
     if not (d / ".git").exists():
-        owner = cfg["github"]["owner"] or subprocess.run(
-            ["gh", "api", "user", "--jq", ".login"], check=True, capture_output=True, text=True).stdout.strip()
-        slug = f"{owner}/{name}"
-        if subprocess.run(["gh", "repo", "view", slug], capture_output=True).returncode != 0:
-            subprocess.run(["gh", "repo", "create", slug, "--private",
+        slug_ = slug(cfg)
+        if subprocess.run(["gh", "repo", "view", slug_], capture_output=True).returncode != 0:
+            subprocess.run(["gh", "repo", "create", slug_, "--private",
                             "--description", "What the foundry agents built lately (generated)"],
                            check=True, capture_output=True)
-            print(f"[foundry] created https://github.com/{slug} — your showcase", flush=True)
+            print(f"[foundry] created https://github.com/{slug_} — your showcase", flush=True)
         git.git(d, "init", "-b", "main")
-        git.git(d, "remote", "add", "origin", f"https://github.com/{slug}.git")
-        git.ensure_deploy_key(cfg, slug)
+        git.git(d, "remote", "add", "origin", f"https://github.com/{slug_}.git")
+        git.ensure_deploy_key(cfg, slug_)
     git.git(d, "add", "README.md")
     if not git.dirty(d):
         return

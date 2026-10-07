@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from foundry import backlog, git, guards, llm, run, scaffold, showcase, stacks
+from foundry import backlog, git, guards, inbox, llm, run, scaffold, showcase, stacks
 
 
 def sh(cwd, *args):
@@ -198,6 +198,110 @@ class Showcase(unittest.TestCase):
         self.assertIn("[`abc1234`](https://github.com/me/Quill/commit/abc1234)", md)
         self.assertIn('▶️ Demo</summary>\n\n```text\n$ curl /api/repos', md)
         self.assertNotIn("gone", md.lower())
+
+
+class Inbox(unittest.TestCase):
+    """The CTO side channel, with the model and git remotes stubbed out."""
+
+    def setUp(self):
+        from unittest import mock
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.cfg = {"paths": {"repos": self.root, "state": self.root / ".state"}, "github": {"owner": "me"}}
+        for name in ("Quill", "Tempo"):
+            sh(self.root, "git", "init", "-q", "-b", "main", name)
+            backlog.save(self.root / name, backlog.Backlog())
+            (self.root / name / "FEEDBACK.md").write_text("# Feedback\n\nNewest at the top.\n\n## 2026-10-01 — older\nx\n")
+        s = scaffold.suite_state(self.cfg, "acme")
+        s["repos"] = s["adopted"] = ["Quill", "Tempo"]
+        s["suite_md"] = "# Suite\n\nVision.\n"
+        self.suite = run.Suite(self.cfg, [self.root / "Quill", self.root / "Tempo"], name="acme")
+        self.commits = []
+        for lp in self.suite.loops:
+            lp._sync = lambda: None
+            lp._commit_main = lambda msg, paths, lp=lp: self.commits.append((lp.repo.name, paths))
+        self.patches = [mock.patch.object(inbox.Inbox, "_import_issues", lambda self: None)]
+        for p in self.patches:
+            p.start()
+
+    def tearDown(self):
+        for p in self.patches:
+            p.stop()
+        self.tmp.cleanup()
+
+    def reply(self, obj):
+        from unittest import mock
+        return mock.patch.object(scaffold, "model_json", lambda *a, **k: (obj, ""))
+
+    def test_due_order_and_timing(self):
+        from datetime import datetime
+        now = datetime(2026, 10, 7, 12)
+        items = {str(i): {"id": str(i), "ts": ts, "prio": prio, "status": st, **extra} for i, (ts, prio, st, extra) in enumerate([
+            ("2026-10-07T11:00:00", "low", "queued", {}),                                       # new: first look
+            ("2026-10-07T11:30:00", "immediate", "queued", {}),
+            ("2026-10-07T10:00:00", "high", "deferred", {"looked": "2026-10-07T11:30:00"}),     # looked 30 min ago
+            ("2026-10-07T04:00:00", "high", "deferred", {"looked": "2026-10-07T05:00:00"}),     # 7 h > 1 day / 4
+            ("2026-10-04T10:00:00", "med", "deferred", {"looked": "2026-10-07T09:50:00"}),      # deadline passed since look
+            ("2026-10-04T10:00:00", "med", "deferred", {"looked": "2026-10-07T11:50:00"}),      # overdue, looked 10 min ago
+            ("2026-10-01T10:00:00", "low", "deferred", {"looked": "2026-10-07T10:30:00"}),      # 90 min: only when planning
+            ("2026-10-07T09:00:00", "high", "done", {"looked": "2026-10-07T09:00:00"}),
+        ])}
+        # ids: 0 new low, 1 immediate, 2 high just looked, 3 high stale, 4 overdue, 5 overdue just looked,
+        #      6 low looked 90 min ago, 7 done
+        due = lambda planning: [it["id"] for it in self.suite.inbox.due({"items": items}, planning, now)]
+        self.assertEqual(due(False), ["4", "1", "3", "0"])  # earliest deadline first
+        self.assertEqual(due(True), ["4", "1", "3", "6", "0"])  # 6 is due Oct 15, 0 Oct 21
+        self.assertTrue(inbox.overdue(items["4"], now))
+        self.assertFalse(inbox.overdue(items["0"], now))
+
+    def test_act_writes_task_feedback_and_suite_note(self):
+        inbox.add(self.cfg, "acme", "Entra SSO before the demo", "immediate")
+        with self.reply({"decision": "act", "why": "blocks the demo", "actions": [
+                {"kind": "task", "product": "quill", "title": "Add Entra SSO", "accept": "go test ./auth",
+                 "position": "top"},
+                {"kind": "feedback", "product": "Tempo", "text": "Assume Entra is the only IdP."},
+                {"kind": "suite", "text": "Entra ID is the first SSO provider."}]}):
+            urgent = self.suite.inbox.process()
+        quill, tempo = self.suite.loops
+        self.assertEqual(urgent, [quill])
+        self.assertEqual(backlog.load(quill.repo).todo[0].title, "Add Entra SSO")
+        fb = (tempo.repo / "FEEDBACK.md").read_text()
+        self.assertLess(fb.index("Assume Entra is the only IdP."), fb.index("2026-10-01 — older"))
+        self.assertIn("> The owner's words: Entra SSO before the demo", fb)
+        for lp in (quill, tempo):
+            self.assertIn("- 20", (lp.repo / "SUITE.md").read_text().split("## Owner notes")[1])
+        self.assertIn("Entra ID is the first SSO provider.", scaffold.suite_state(self.cfg, "acme")["suite_md"])
+        self.assertEqual(sorted(self.commits), [("Quill", ["BACKLOG.md", "SUITE.md"]),
+                                                ("Tempo", ["FEEDBACK.md", "SUITE.md"])])
+        (it,) = inbox.load(self.cfg, "acme")["items"].values()
+        self.assertEqual((it["status"], it["why"]), ("done", "blocks the demo"))
+        self.assertIn("Quill/T-001 (top): Add Entra SSO", it["did"])
+
+    def test_defer_bad_product_and_model_failure_never_raise(self):
+        inbox.add(self.cfg, "acme", "later thing")
+        with self.reply({"decision": "defer", "why": "needs auth", "revisit_when": "Quill auth is done"}):
+            self.suite.inbox.process()
+        inbox.add(self.cfg, "acme", "typo product")
+        with self.reply({"decision": "act", "actions": [{"kind": "task", "product": "Nope", "title": "x"}]}):
+            self.suite.inbox.process()
+        items = sorted(inbox.load(self.cfg, "acme")["items"].values(), key=lambda i: i["text"])
+        self.assertEqual([(i["text"], i["status"]) for i in items],
+                         [("later thing", "deferred"), ("typo product", "deferred")])
+        self.assertEqual(items[0]["revisit_when"], "Quill auth is done")
+        self.assertIn("can't apply 'task' to product 'Nope'", items[1]["revisit_when"])
+        self.assertEqual(self.commits, [])
+
+    def test_owner_notes_newest_first(self):
+        md = inbox._add_owner_note("# Suite\n", "one")
+        md = inbox._add_owner_note(md, "two")
+        self.assertEqual(md.split("## Owner notes\n\n")[1], "- two\n- one\n")
+
+    def test_showcase_lists_inbox(self):
+        from datetime import datetime
+        inbox.add(self.cfg, "acme", "queued thought", "low")
+        md = showcase.render(self.cfg, datetime.now())
+        self.assertIn("## CTO inbox — acme", md)
+        self.assertRegex(md, r"- ⏳ \*\*low\*\* \(by \w+ \d+ \w+ \d\d:\d\d\) queued thought — _waiting for the CTO_")
 
 
 class Interview(unittest.TestCase):

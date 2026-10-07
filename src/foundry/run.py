@@ -13,7 +13,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from . import agent, backlog, config, git, guards, sandbox, serve, showcase
+from . import agent, backlog, config, git, guards, inbox, sandbox, serve, showcase
 
 LOOP_OWNED = ["BACKLOG.md", "JOURNAL.md", "FEEDBACK.md"]  # restored if the agent edits them
 
@@ -112,7 +112,7 @@ def main(cfg: dict, args: list[str]) -> int:
             print(f"[foundry] not set up yet (finish `foundry cto {rest[0]}`): {', '.join(waiting)}")
         if not ready:
             sys.exit("no products in this suite are set up yet")
-        return Suite(cfg, [config.repo_path(cfg, n) for n in ready], once="--once" in args).run()
+        return Suite(cfg, [config.repo_path(cfg, n) for n in ready], once="--once" in args, name=rest[0]).run()
     if not args:
         sys.exit("usage: foundry run <repo> [--once] | foundry run --suite <suite> [--once]")
     repo = config.repo_path(cfg, args[0])
@@ -480,11 +480,26 @@ class Suite:
     """One loop over several repos: round-robin between those with work that can start, so every
     product moves; a task whose Needs (here or in another repo) aren't Done waits its turn."""
 
-    def __init__(self, cfg, repos: list[Path], once=False):
+    def __init__(self, cfg, repos: list[Path], once=False, name: str | None = None):
         self.cfg, self.once = cfg, once
         self.loops = [Loop(cfg, r) for r in repos]
         for lp in self.loops:
             lp.peers = [o.repo for o in self.loops if o is not lp]
+        self.inbox = inbox.Inbox(cfg, name, self.loops) if name else None
+
+    def triage_only(self) -> int:
+        """Let the CTO handle the inbox now, without running tasks (no run is active)."""
+        held = []
+        try:
+            for lp in self.loops:
+                lp._acquire_lock()
+                held.append(lp)
+            self.inbox.process()
+            showcase.publish(self.cfg)
+        finally:
+            for lp in held:
+                lp.lock.unlink(missing_ok=True)
+        return 0
 
     def run(self) -> int:
         held = []
@@ -511,10 +526,18 @@ class Suite:
                 except Stop as e:
                     print(f"[foundry] skipping {lp.name}: {e}", flush=True)
                     lp.stopped(f"skipped by the suite run: {e}")
-            turn = 0
+            turn, urgent = 0, []
             while active:
+                if self.inbox:  # the CTO's side channel, between tasks
+                    urgent = [lp for lp in self.inbox.process() if lp in active] or urgent
                 order = active[turn % len(active):] + active[:turn % len(active)]
-                current = next((lp for lp in order if lp.ready()), None)
+                current = next((lp for lp in urgent + order if lp.ready()), None)
+                urgent = [lp for lp in urgent if lp is not current]
+                if current and self.inbox and not backlog.load(current.repo).todo:
+                    self.inbox.process(planning=True)  # about to plan: a good moment for low / deferred thoughts
+                if current is None and self.inbox:  # before giving up, deferred thoughts get a look
+                    self.inbox.process(planning=True)
+                    current = next((lp for lp in order if lp.ready()), None)
                 if current is None:
                     print("[foundry] suite stopped: nothing can start —", flush=True)
                     for lp in active:

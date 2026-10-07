@@ -14,6 +14,10 @@ USAGE = """usage: foundry <command> [args]
                                     the repos that exist, creates the rest, starts the suite run.
                                     Naming more repos later adds them. --review: approve each document;
                                     --no-run: stop after setup
+  tell <suite> [--now|--high|--med|--low] "…"
+                                    drop a thought in the CTO's inbox; it decides when and how to act,
+                                    within the priority's deadline: now / 1 day / 3 days (default) / 2 weeks.
+                                    `tell <suite>` alone shows the inbox. Issues on foundry-showcase count too
   purge <name> [-y]                 forget a paused scaffold/adopt session
   purge suite <suite> [-y]          forget a suite (repos are left alone)
   run <repo>                        work the backlog unattended (Ctrl-C stops cleanly)
@@ -41,6 +45,9 @@ def main() -> int:
     if cmd == "cto":
         from . import scaffold
         return scaffold.cto(cfg, rest)
+    if cmd == "tell":
+        from . import inbox
+        return inbox.tell(cfg, rest)
     if cmd == "purge":
         from . import scaffold
         return scaffold.purge(cfg, rest)

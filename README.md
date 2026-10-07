@@ -143,6 +143,32 @@ that have a task ready to start, so every product moves. A task waits until ever
 `Needs` is Done. Planners see the other products' backlogs. A repo that can't start (dirty,
 wrong branch) is skipped with a message, and the rest carry on.
 
+### Telling the CTO something: `foundry tell`
+
+`foundry tell <suite> [--now|--high|--med|--low] "thought"` drops a thought into the CTO's inbox at
+any time, even while the suite runs. You can also open an issue on the showcase repo, which works
+from your phone; label it `immediate`, `high`, `med` or `low`. The priority is a deadline: act now,
+within 1 day, within 3 days (the default), or within 2 weeks.
+
+**When it looks:** every new thought gets a first look at the next task boundary. If no run is
+active, `tell` looks right away.
+
+**What it decides:** it acts, defers ("after Quill's auth lands"), or drops a thought that's already
+covered (it says where). Acting means one or more of:
+- a backlog task;
+- direction for a product's agents, added to its `FEEDBACK.md`;
+- an owner note in `SUITE.md` for every product.
+
+**Deferring:** a deferred thought comes back up when a product is about to plan new work, at least
+every quarter of its window (at most every 12 h), and at the deadline. At the deadline the CTO has
+to act. If it still hasn't, the thought shows as 🔴 overdue under "Needs you".
+
+**Immediate thoughts:** an immediate task goes to the top of its backlog, and that product runs
+next. It waits for the task that's running to finish; it doesn't interrupt it.
+
+Decisions show up in the showcase's "CTO inbox". An issue gets a reply comment and is closed once
+it's handled. `foundry tell <suite>` on its own lists the inbox.
+
 ## The showcase: checking in
 
 You don't need to watch the loops. After every iteration foundry regenerates the README of a

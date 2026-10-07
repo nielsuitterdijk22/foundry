@@ -903,7 +903,7 @@ def cto(cfg: dict, args: list[str]) -> int:
         say(f"\nSuite {names[0]} is set up. Next: `foundry run --suite {names[0]}`", "h")
         return 0
     say(f"\nSuite {names[0]} is set up — starting the suite run (Ctrl-C stops it cleanly).", "h")
-    return run.Suite(cfg, [config.repo_path(cfg, n) for n in adopted]).run()
+    return run.Suite(cfg, [config.repo_path(cfg, n) for n in adopted], name=names[0]).run()
 
 
 def _note(cfg, name: str, reason: str):
