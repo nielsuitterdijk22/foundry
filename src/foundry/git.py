@@ -43,10 +43,21 @@ def ensure_deploy_key(cfg: dict, slug_: str) -> Path:
     return key
 
 
+def _known_hosts(cfg: dict) -> Path:
+    """GitHub's SSH host keys from its API (via gh), kept separate from ~/.ssh."""
+    path = config.state_dir(cfg) / "known_hosts"
+    if not path.exists():
+        keys = subprocess.run(["gh", "api", "meta", "--jq", ".ssh_keys[]"], check=True,
+                              text=True, capture_output=True).stdout.split("\n")
+        path.write_text("".join(f"github.com {k}\n" for k in keys if k))
+    return path
+
+
 def _ssh_env(cfg: dict, slug_: str) -> dict:
     key = key_path(cfg, slug_)
     return {**os.environ, "GIT_SSH_COMMAND":
-            f"ssh -i {key} -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"}
+            f"ssh -i {key} -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes "
+            f"-o UserKnownHostsFile={_known_hosts(cfg)}"}
 
 
 def remote_op(cfg: dict, repo: Path, *args: str) -> str:
@@ -76,3 +87,16 @@ def changed_files(repo: Path, base: str) -> list[tuple[str, str]]:
 
 def show(repo: Path, rev: str, path: str) -> str:
     return git(repo, "show", f"{rev}:{path}", check=False)
+
+
+IGNORED = [".foundry/", "REPORT.md"]  # agent scratch space and the local daily report
+
+
+def ensure_ignored(repo: Path) -> bool:
+    """Add foundry's local-only paths to .gitignore. Returns True if it changed."""
+    gi = repo / ".gitignore"
+    text = gi.read_text() if gi.exists() else ""
+    missing = [e for e in IGNORED if e not in text.split()]
+    if missing:
+        gi.write_text(text.rstrip("\n") + ("\n" if text.strip() else "") + "\n".join(missing) + "\n")
+    return bool(missing)

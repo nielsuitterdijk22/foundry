@@ -153,12 +153,8 @@ class Loop:
     # ---------- git helpers ----------
 
     def _ensure_gitignore(self):
-        gi = self.repo / ".gitignore"
-        text = gi.read_text() if gi.exists() else ""
-        if ".foundry/" not in text.split():
-            gi.write_text(text.rstrip("\n") + ("\n" if text else "") + ".foundry/\n")
-            git.git(self.repo, "add", ".gitignore")
-            git.git(self.repo, "commit", "-m", "foundry: ignore .foundry/")
+        if git.ensure_ignored(self.repo):
+            self._commit_main("foundry: ignore local-only files", [".gitignore"])
 
     def _sync(self):
         """Commit owner edits to FEEDBACK.md, then fast-forward from GitHub."""
@@ -172,7 +168,7 @@ class Loop:
         try:
             git.git(self.repo, "merge", "--ff-only", "FETCH_HEAD")
         except RuntimeError:
-            raise Stop("local main and GitHub main have diverged; reconcile by hand")
+            raise Stop("local main and GitHub main have diverged; reconcile by hand") from None
         git.remote_op(self.cfg, self.repo, "push", "main:main")
 
     def _reset_to_main(self, branch: str | None = None):
@@ -265,7 +261,7 @@ class Loop:
             last = (check_tail.splitlines()[-15:] if check_tail else [])
             st["notes"].append(f"attempt {n}: {failure}. Agent summary: "
                                f"{(_section(summary, 'Done') or res.final_text)[:600]!r}"
-                               + (f"\n  ./check tail:\n    " + "\n    ".join(last) if last else ""))
+                               + ("\n  ./check tail:\n    " + "\n    ".join(last) if last else ""))
             st["in_progress"] = False
             self._save(st)
             self._metric(outcome="failed", reason=failure, **metric)

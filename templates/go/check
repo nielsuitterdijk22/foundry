@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# The single quality gate: format, vet/type-check, lint, test. CI and foundry run exactly this.
+set -euo pipefail
+cd "$(dirname "$0")"
+echo "== gofmt"
+unformatted="$(gofmt -l .)"
+if [ -n "$unformatted" ]; then echo "$unformatted"; echo "fix: gofmt -w ."; exit 1; fi
+echo "== go vet"
+go vet ./...
+echo "== golangci-lint"
+golangci-lint run ./...
+echo "== go test"
+go test -race -count=1 ./...
+echo "== ok"

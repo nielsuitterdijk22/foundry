@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# The single quality gate: type-check, lint, test. CI and foundry run exactly this.
+set -euo pipefail
+cd "$(dirname "$0")"
+[ -d node_modules ] || npm ci --no-audit --no-fund
+echo "== tsc"
+npx tsc --noEmit
+echo "== eslint"
+npx eslint .
+echo "== vitest"
+npx vitest run
+echo "== ok"

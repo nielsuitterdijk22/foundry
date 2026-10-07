@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# The single quality gate: format, lint + type-check, test. CI and foundry run exactly this.
+set -euo pipefail
+cd "$(dirname "$0")"
+echo "== cargo fmt"
+cargo fmt --all -- --check
+echo "== cargo clippy"
+cargo clippy --all-targets --all-features -- -D warnings
+echo "== cargo test"
+cargo test --all-features
+echo "== ok"
