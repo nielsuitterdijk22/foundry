@@ -56,7 +56,7 @@ carries on. Ctrl-C kills the container, discards the attempt without counting it
 ## Setup (once)
 
 Prerequisites: Apple Silicon Mac, [uv](https://docs.astral.sh/uv/), Docker Desktop,
-`gh` logged in (`gh auth login`), and OpenCode only if you want to use it interactively.
+`gh` logged in (`gh auth login`). OpenCode on the host is optional; the sandbox has its own.
 
 ```bash
 git clone https://github.com/nielsuitterdijk22/foundry && cd foundry
@@ -106,6 +106,24 @@ todo notes. If there's no `./check`, the model drafts one from the Makefile and 
 is red on main, the first task becomes making it green. Your existing CI is left alone; foundry
 adds `.github/workflows/foundry-check.yml`.
 
+## Things to know (measured on an M5 Pro, 48 GB)
+
+- **Speed.** Qwen3.8-27B 4-bit processes prompts at ~400–470 tok/s and generates ~15–17 tok/s.
+  A small task takes a few minutes; a gnarly one up to the 60-minute cap.
+- **Thinking mode is off by default.** OpenCode doesn't pass the model's reasoning back to it,
+  so with thinking on, Qwen3.8 re-thinks every step and can spend 8K+ tokens (8+ minutes)
+  before acting. Non-thinking mode works in tight write → test → fix loops. Flip `thinking`
+  in foundry.toml (and the sampling values) to compare with `foundry bench`.
+- **Output cap (8K tokens per response).** It stops runaway generations, which can also crash
+  mlx-lm (Metal buffer-count limit, mlx-lm#1662). If the server dies anyway, `foundry run`
+  restarts it and retries without counting the attempt.
+- **Keep Docker light.** Docker Desktop's VM (8 GB) also hosts the sandbox. Heavy local
+  clusters starve it and, by competing for memory bandwidth, roughly halve model speed.
+- **Sleep.** foundry runs `caffeinate`, which stops idle sleep but not lid-closed sleep. Keep the
+  lid open, or use an external display and power.
+- **Run one thing at a time** against the server (one `run` or `bench`). It handles concurrent
+  requests, but they slow each other down.
+
 ## Swapping models
 
 Edit `[model]` in `foundry.toml` (any MLX model on Hugging Face), then:
@@ -117,8 +135,7 @@ foundry bench                                   # compare against earlier rows i
 ```
 
 The model must emit tool calls that mlx-lm can parse (`foundry serve status` checks this).
-Qwen 3.x models work. `thinking = false` trades quality for speed; with it, use
-`temperature = 0.7`, `top_p = 0.8`. If you upgrade mlx-lm, rerun `serve status`.
+Qwen 3.x models work. If you upgrade mlx-lm, rerun `serve status`.
 
 ## Files in a foundry project
 
