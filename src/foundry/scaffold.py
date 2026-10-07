@@ -11,6 +11,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import traceback
 from pathlib import Path
 
 from . import agent, backlog, config, git, llm, sandbox, serve, stacks, ui
@@ -186,8 +187,9 @@ def edit(text: str, path: Path) -> str:
     return path.read_text()
 
 
-def model_json(cfg, system: str, messages: list[dict], label: str = "drafting", **kw):
-    """Ask for JSON, streaming it (dim) as it's written; up to two corrective retries."""
+def model_json(cfg, system: str, messages: list[dict], label: str = "drafting", want: type = dict, **kw):
+    """Ask for JSON of the wanted shape (a list of objects, or one object), streaming it (dim) as
+    it's written; up to two corrective retries."""
     for _ in range(3):
         printer = ui.StreamPrinter(label, dim_content=True)
         try:
@@ -195,12 +197,29 @@ def model_json(cfg, system: str, messages: list[dict], label: str = "drafting", 
         finally:
             printer.done()
         try:
-            return llm.extract_json(text), text
-        except (ValueError, json.JSONDecodeError):
-            say("(not valid JSON — asking again)", "w")
+            return _shape(llm.extract_json(text), want), text
+        except (ValueError, json.JSONDecodeError) as e:
+            say(f"({str(e).splitlines()[0]} — asking again)", "w")
             messages = [*messages, {"role": "assistant", "content": text},
-                        {"role": "user", "content": "That was not valid JSON. Reply again with only the JSON."}]
-    raise RuntimeError("model did not return valid JSON three times")
+                        {"role": "user", "content": f"That reply was not usable ({str(e).splitlines()[0]}). Reply again "
+                                                    "with only the JSON, in exactly the format asked for."}]
+    raise RuntimeError("model did not return usable JSON three times")
+
+
+def _shape(obj, want: type):
+    """Models often wrap a requested list in an object ({"stories": [...]}) or a requested object
+    in a one-item list; unwrap those, reject anything else."""
+    if want is list:
+        if isinstance(obj, dict) and len(lists := [v for v in obj.values() if isinstance(v, list)]) == 1:
+            obj = lists[0]
+        if isinstance(obj, list) and obj and all(isinstance(x, dict) for x in obj):
+            return obj
+        raise ValueError("expected a JSON list of objects")
+    if isinstance(obj, list) and len(obj) == 1 and isinstance(obj[0], dict):
+        obj = obj[0]
+    if isinstance(obj, dict):
+        return obj
+    raise ValueError("expected a JSON object")
 
 
 class QuestionPrinter(ui.StreamPrinter):
@@ -364,7 +383,8 @@ def render_features(items: list[dict]) -> str:
     out = ["# Features\n\n> Owner document. Agents treat it as read-only.\n"]
     for f in items:
         status = f" — {f['status']}" if f.get("status") else ""
-        out.append(f"\n## {f['id']}: {f['name']} ({f.get('priority', 'must')}){status}\n\n{f['description']}\n")
+        out.append(f"\n## {f.get('id', '?')}: {f.get('name', '(unnamed)')} ({f.get('priority', 'must')}){status}\n\n"
+                   f"{f.get('description', '')}\n")
     return "".join(out)
 
 
@@ -373,8 +393,8 @@ def render_stories(items: list[dict]) -> str:
     for s in items:
         status = f" — {s['status']}" if s.get("status") else ""
         crit = "\n".join(f"- [ ] {c}" for c in s.get("acceptance", []))
-        out.append(f"\n## {s['id']}: {s['title']} ({s.get('feature', '')}){status}\n\n"
-                   f"As {s['as_a']}, I want {s['i_want']}, so that {s['so_that']}.\n\n"
+        out.append(f"\n## {s.get('id', '?')}: {s.get('title', '(untitled)')} ({s.get('feature', '')}){status}\n\n"
+                   f"As {s.get('as_a', 'a user')}, I want {s.get('i_want', '?')}, so that {s.get('so_that', '?')}.\n\n"
                    f"Acceptance criteria:\n{crit}\n")
     return "".join(out)
 
@@ -545,7 +565,7 @@ def features(cfg, s: Session, seed: str):
     def gen():
         items, _ = model_json(cfg, "You are a precise product analyst.",
                               [{"role": "user", "content": FEATURES_PROMPT.format(context=ctx, status=status)}],
-                              label="drafting features", **FAST)
+                              label="drafting features", want=list, **FAST)
         return render_features(items)
     _review(s, "features_md", "features", gen)
 
@@ -556,7 +576,7 @@ def stories(cfg, s: Session, seed: str):
         items, _ = model_json(cfg, "You are a precise product analyst.",
                               [{"role": "user", "content": STORIES_PROMPT.format(
                                   context=_context(s), features=s["features_md"], status=status)}],
-                              label="drafting user stories", **FAST)
+                              label="drafting user stories", want=list, **FAST)
         return render_stories(items)
     _review(s, "stories_md", "user stories", gen)
 
@@ -616,7 +636,7 @@ def make_backlog(cfg, s: Session, seed: str, peers: str = ""):
         items, _ = model_json(cfg, "You are a senior engineer planning work for junior agents.",
                               [{"role": "user", "content": BACKLOG_PROMPT.format(
                                   stack=s["stack"], context=_context(s), stories=s["stories_md"],
-                                  existing=existing, peers=peers, needs=needs)}], label="drafting the backlog", **FAST)
+                                  existing=existing, peers=peers, needs=needs)}], label="drafting the backlog", want=list, **FAST)
         bl = backlog.Backlog()
         bl.sections["Todo"] = backlog.from_items(items)
         return bl.render()
@@ -881,9 +901,13 @@ def cto(cfg: dict, args: list[str]) -> int:
                     adopt_repo(cfg, p, r)
                 else:
                     create_repo(cfg, p, r)
-            except (Skip, SystemExit, RuntimeError, subprocess.CalledProcessError) as e:
+            except (Skip, SystemExit, Exception) as e:  # noqa: BLE001
                 # Never stop the whole suite for one product: note it, carry on, retry next time.
                 reason = str(e).strip().split("\n")[0] or type(e).__name__
+                if not isinstance(e, (Skip, SystemExit, RuntimeError, subprocess.CalledProcessError)):
+                    log = config.state_dir(cfg, "logs", r.name.lower()) / "cto-error.log"
+                    log.write_text(traceback.format_exc())
+                    reason = f"{type(e).__name__}: {reason} (a foundry bug — traceback in {log})"
                 say(f"Skipping {r.name} for now: {reason}", "w")
                 s["skipped"] = {**(s["skipped"] or {}), r.name: reason}
                 _note(cfg, r.name, f"CTO setup skipped: {reason}. Fix it, then rerun `foundry cto {names[0]}`.")

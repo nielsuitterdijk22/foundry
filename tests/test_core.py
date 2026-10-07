@@ -321,6 +321,16 @@ class Interview(unittest.TestCase):
         self.assertEqual(scaffold._normalize(msgs)[1:], [{"role": "assistant", "content": "Shared instance?"}])
         self.assertEqual(scaffold._qa(msgs), "Q: Shared instance?")
 
+    def test_json_shapes_unwrapped(self):
+        stories = [{"id": "US-001"}, {"id": "US-002"}]
+        self.assertEqual(scaffold._shape({"stories": stories}, list), stories)
+        self.assertEqual(scaffold._shape(stories, list), stories)
+        self.assertEqual(scaffold._shape([{"stack": "go"}], dict), {"stack": "go"})
+        for bad, want in (({"a": [1], "b": [2]}, list), (["x"], list), ([], list), ("x", dict), ([{}, {}], dict)):
+            with self.assertRaises(ValueError):
+                scaffold._shape(bad, want)
+        self.assertIn("## ?: (untitled)", scaffold.render_stories([{"acceptance": ["x"]}]))
+
     def test_missing_closing_braces_repaired(self):
         self.assertEqual(llm.extract_json('MISSION\n{"mission": "a {b}", "summary": {"x": ["]"]'),
                          {"mission": "a {b}", "summary": {"x": ["]"]}})

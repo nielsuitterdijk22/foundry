@@ -121,5 +121,5 @@ def from_items(items: list[dict], start: int = 1) -> list[Task]:
             body += f"- Needs: {', '.join(n.strip() for n in needs if n.strip())}\n"
         if it.get("details"):
             body += "\n" + it["details"].strip() + "\n"
-        tasks.append(Task(f"T-{i:03d}", it["title"].strip(), body))
+        tasks.append(Task(f"T-{i:03d}", str(it.get("title") or "(untitled)").strip(), body))
     return tasks
