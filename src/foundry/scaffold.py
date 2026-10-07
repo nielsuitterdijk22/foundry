@@ -434,7 +434,9 @@ def create_repo(cfg, s: Session, repo: Path):
         _sandbox_sh(cfg, repo, "npm install --no-audit --no-fund -D " + " ".join(stacks.TS_DEV_DEPS))
     (repo / ".github" / "workflows" / "check.yml").write_text(stacks.ci_workflow(repo))
     (repo / "README.md").exists() or (repo / "README.md").write_text(
-        f"# {repo.name}\n\n{s['mission_md'].split(chr(10) * 2)[1].strip()}\n\n"
+        f"# {repo.name}\n\n[![check](https://github.com/{slug}/actions/workflows/check.yml/badge.svg)]"
+        f"(https://github.com/{slug}/actions/workflows/check.yml)\n\n"
+        f"{s['mission_md'].split(chr(10) * 2)[1].strip()}\n\n"
         "Built by foundry agents. See MISSION.md, FEATURES.md, BACKLOG.md and JOURNAL.md.\n\n"
         "Run all checks: `./check`\n")
 

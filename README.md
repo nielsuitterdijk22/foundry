@@ -1,5 +1,7 @@
 # foundry
 
+[![ci](https://github.com/nielsuitterdijk22/foundry/actions/workflows/ci.yml/badge.svg)](https://github.com/nielsuitterdijk22/foundry/actions/workflows/ci.yml)
+
 Local autonomous dev agents for a Mac. A local coding model (MLX) drives
 [OpenCode](https://opencode.ai) inside a locked-down container. A plain Python loop
 works through a project's backlog one task at a time, and you check in once a day.
