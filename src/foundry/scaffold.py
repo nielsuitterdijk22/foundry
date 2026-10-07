@@ -8,6 +8,7 @@ quit (/quit) and rerun the same command to resume.
 import json
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -239,6 +240,10 @@ class Session:
     def __getitem__(self, k):
         return self.d.get(k)
 
+    def discard(self):
+        self.path.unlink(missing_ok=True)
+        shutil.rmtree(self.edit_dir, ignore_errors=True)
+
     def __setitem__(self, k, v):
         self.d[k] = v
         self.path.write_text(json.dumps(self.d, indent=2))
@@ -257,7 +262,7 @@ def main(cfg: dict, mode: str, args: list[str]) -> int:
     if len(s.d) > 1:
         done = [k for k in ("mission_md", "features_md", "stories_md", "stack", "backlog_md") if s[k]]
         say(f"Resuming {mode} of {name} — done so far: {', '.join(done) or 'part of the interview'}.\n"
-            f"(Saved in {s.path}; delete it to start over.)", "dim")
+            f"(To start over instead: foundry purge {args[0]})", "dim")
     seed = _seed(repo) if mode == "adopt" else ""
     try:
         interview(cfg, s, name, seed)
@@ -272,7 +277,7 @@ def main(cfg: dict, mode: str, args: list[str]) -> int:
     except (KeyboardInterrupt, EOFError):
         say(f"\nPaused. Run `foundry {mode} {args[0]}` again to resume.", "w")
         return 1
-    s.path.unlink()
+    s.discard()
     say(f"\nDone. Next: `foundry run {name}`", "h")
     return 0
 
@@ -605,3 +610,30 @@ def adopt_repo(cfg, s: Session, repo: Path):
     main = git.default_branch(repo)
     git.remote_op(cfg, repo, "push", f"{main}:{main}")
     say(f"Pushed foundry files to https://github.com/{slug}", "h")
+
+
+# ---------------------------------------------------------------- purge
+
+def purge(cfg: dict, args: list[str]) -> int:
+    """foundry purge <name> [-y]: forget a paused scaffold/adopt session."""
+    names = [a for a in args if not a.startswith("-")]
+    if not names:
+        saved = sorted(p.stem for p in config.state_dir(cfg, "scaffold").glob("*.json"))
+        sys.exit("usage: foundry purge <name> [-y]\n" +
+                 (f"paused sessions: {', '.join(saved)}" if saved else "no paused sessions"))
+    name = config.repo_path(cfg, names[0]).name
+    path = config.state_dir(cfg, "scaffold") / f"{name.lower()}.json"
+    if not path.exists():
+        sys.exit(f"no paused scaffold/adopt session for {name}")
+    s = Session(cfg, name, "scaffold")
+    answers = sum(m["role"] == "user" for m in s["transcript"] or []) - 1
+    done = [k.removesuffix("_md") for k in ("mission_md", "features_md", "stories_md", "stack", "backlog_md") if s[k]]
+    answers = max(answers, 0)
+    say(f"Paused session for {name}: {answers} interview answer{'' if answers == 1 else 's'}"
+        + (f"; accepted: {', '.join(done)}" if done else ""))
+    if "-y" not in args and not yes("Delete it? The next scaffold/adopt starts from scratch.", default=False):
+        return 1
+    s.discard()
+    say(f"Purged. `foundry scaffold {name}` or `foundry adopt {name}` starts fresh.")
+    return 0
+

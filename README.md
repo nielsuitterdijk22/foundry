@@ -12,6 +12,7 @@ foundry scaffold <name>   interview → private GitHub repo with mission, storie
 foundry adopt <repo>      the same, for an existing repo
 foundry run <repo>        work the backlog unattended: tests first, ./check green, merge, push
 foundry report <repo>     REPORT.md for your daily check-in
+foundry purge <name>      forget a paused scaffold/adopt session and start over
 foundry serve …           start / stop / restart / status the model server
 foundry bench             tokens/s + a fixed agentic task, logged to bench/results.csv
 ```
@@ -98,7 +99,9 @@ local model. It presses for concrete examples, the user, what's out of scope, wh
 happen and what "done" means, and finishes when you accept a two-sentence mission. Then it drafts
 features and user stories (each opens in `$EDITOR` for you to fix), picks a stack (Go, Rust or
 TypeScript), drafts the backlog, creates a **private** repo, adds a write deploy key, makes sure
-`./check` is green on the skeleton, and pushes. `/quit` pauses; rerunning the command resumes.
+`./check` is green on the skeleton, and pushes. You can stop anytime (`/quit` or Ctrl-C, even mid-answer). Rerunning the same
+command resumes: answers are saved as you give them, and accepted steps are kept.
+`foundry purge <name>` throws a paused session away.
 
 `foundry adopt <repo>` works on an existing GitHub repo in `~/Documents/Repos`. The worktree must
 be clean and on `main`. The interview is seeded with the repo's own README, AGENTS/CLAUDE.md and

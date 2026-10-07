@@ -10,6 +10,7 @@ USAGE = """usage: foundry <command> [args]
   bench                             run the fixed benchmark task, report tokens/s + pass/fail
   scaffold <name>                   interview → new private GitHub repo with all foundry files
   adopt <repo>                      bring an existing repo under foundry (interview seeded from it)
+  purge <name> [-y]                 forget a paused scaffold/adopt session (start over)
   run <repo>                        work the backlog unattended (Ctrl-C stops cleanly)
   report <repo>                     write REPORT.md for the daily check-in
 """
@@ -31,6 +32,9 @@ def main() -> int:
     if cmd in ("scaffold", "adopt"):
         from . import scaffold
         return scaffold.main(cfg, cmd, rest)
+    if cmd == "purge":
+        from . import scaffold
+        return scaffold.purge(cfg, rest)
     if cmd == "run":
         from . import run
         return run.main(cfg, rest)
