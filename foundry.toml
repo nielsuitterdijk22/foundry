@@ -1,0 +1,56 @@
+# foundry.toml — the single place to configure foundry.
+# Paths may start with ~. Durations are minutes unless stated.
+
+[paths]
+repos = "~/Documents/Repos"        # where scaffolded / adopted projects live
+state = "~/.foundry"               # logs, pid files, run state, deploy keys, metrics
+
+[model]
+# Any MLX model on Hugging Face (or a local path). Swap models here, then `foundry serve restart`.
+id = "lmstudio-community/Qwen3.8-27B-MLX-4bit"
+context = 131072                   # tokens OpenCode may use (model supports 262144)
+max_output = 32768                 # max tokens per response
+thinking = true                    # Qwen thinking mode (slower, better at agentic work)
+
+# Sampling. Qwen3.8 recommends these for thinking mode; for thinking=false use
+# temperature=0.7, top_p=0.8.
+[model.sampling]
+temperature = 1.0
+top_p = 0.95
+top_k = 20
+min_p = 0.0
+
+[server]
+host = "127.0.0.1"
+port = 8080
+prompt_cache_bytes = 8_000_000_000 # caps the server's prompt KV cache (prevents Metal OOM)
+startup_timeout = 600              # seconds to wait for the model to load
+extra_args = []                    # passed verbatim to mlx_lm.server
+
+[run]
+max_attempts = 3                   # failed attempts before a task is parked
+task_timeout = 60                  # wall-clock cap per attempt
+task_token_budget = 1_500_000      # new tokens processed per attempt (uncached input + output)
+check_timeout = 20                 # cap for one ./check run
+protected = ["MISSION.md", "FEATURES.md", "USER_STORIES.md"]
+
+[sandbox]
+image = "foundry-agent"
+proxy_image = "foundry-proxy"
+cpus = 6
+memory = "6g"
+# Hosts the agent may reach (through the allowlist proxy). The model server is added automatically.
+allow = [
+  # Go
+  "proxy.golang.org", "sum.golang.org", "storage.googleapis.com",
+  # Rust
+  "index.crates.io", "static.crates.io", "crates.io",
+  # npm
+  "registry.npmjs.org",
+  # Python (for tooling some projects use)
+  "pypi.org", "files.pythonhosted.org",
+]
+
+[github]
+owner = ""                         # empty = the account `gh` is logged in as
+private = true
