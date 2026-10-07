@@ -12,7 +12,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from . import agent, backlog, config, git, llm, sandbox, serve, stacks
+from . import agent, backlog, config, git, llm, sandbox, serve, stacks, ui
 
 # Interview runs without thinking mode: much faster, and plenty for asking questions.
 FAST = dict(thinking=False, temperature=0.7, top_p=0.8)
@@ -33,11 +33,13 @@ Rules:
   never (what must never happen: data loss, security, privacy, cost...), constraints
   (platform, data, integrations, offline, performance).
 {seed}
-Reply with a single JSON object and nothing else, one of:
-{{"action": "ask", "covered": ["<topics already answered concretely>"], "question": "<one question>"}}
-{{"action": "propose", "mission": "<exactly two sentences>", "summary": {{"problem": "...",
-  "users": "...", "workflows": ["..."], "examples": ["..."], "done": ["..."],
-  "out_of_scope": ["..."], "never": ["..."], "constraints": ["..."]}}}}
+Reply format:
+- To ask: reply with ONLY the question (1-3 short sentences). No preamble, no JSON, no lists.
+- To propose (only when every topic is covered concretely): first line exactly MISSION, then
+  one JSON object:
+{{"mission": "<exactly two sentences>", "summary": {{"problem": "...", "users": "...",
+  "workflows": ["..."], "examples": ["..."], "done": ["..."], "out_of_scope": ["..."],
+  "never": ["..."], "constraints": ["..."]}}}}
 Propose only when every topic is covered concretely."""
 
 FEATURES_PROMPT = """From this project definition, derive the product's features.
@@ -129,16 +131,44 @@ def edit(text: str, path: Path) -> str:
     return path.read_text()
 
 
-def model_json(cfg, system: str, messages: list[dict], **kw):
-    """Ask for JSON; up to two corrective retries if the model returns something unparsable."""
+def model_json(cfg, system: str, messages: list[dict], label: str = "drafting", **kw):
+    """Ask for JSON, streaming it (dim) as it's written; up to two corrective retries."""
     for _ in range(3):
-        text = llm.ask(cfg, system, messages, **kw)
+        printer = ui.StreamPrinter(label, dim_content=True)
+        try:
+            text = llm.ask(cfg, system, messages, on_delta=printer, **kw)
+        finally:
+            printer.done()
         try:
             return llm.extract_json(text), text
         except (ValueError, json.JSONDecodeError):
+            say("(not valid JSON — asking again)", "w")
             messages = [*messages, {"role": "assistant", "content": text},
                         {"role": "user", "content": "That was not valid JSON. Reply again with only the JSON."}]
     raise RuntimeError("model did not return valid JSON three times")
+
+
+class QuestionPrinter(ui.StreamPrinter):
+    """Streams a question in cyan; hides a MISSION/JSON proposal (shown formatted afterwards)."""
+
+    def __init__(self):
+        super().__init__("Qwen", style=ui.CYAN)
+        self.buf = ""
+
+    def __call__(self, kind, text):
+        if kind != "content" or self.hide or self.mode == "content":
+            return super().__call__(kind, text)
+        self.buf += text
+        head = self.buf.lstrip()
+        if len(head) < 7 and "MISSION".startswith(head) and not head.startswith("{"):
+            self.tokens += 1
+            return  # can't tell yet
+        if head.startswith(("MISSION", "{")):
+            self.hide = True
+            self.status.label = "drafting the mission"
+            self.tokens += 1
+            return
+        super().__call__("content", self.buf.lstrip())
 
 
 # ---------------------------------------------------------------- rendering
@@ -260,12 +290,23 @@ def interview(cfg, s: Session, name: str, seed: str):
     say(f"\nInterview for {name}. One question at a time. End a line with \\ to continue it.\n"
         "Commands: /done (propose the mission now), /quit (pause; resume later)\n", "dim")
     while True:
-        reply, raw = model_json(cfg, system, msgs, **FAST)
-        msgs.append({"role": "assistant", "content": json.dumps(reply)})
+        print()
+        printer = QuestionPrinter()
+        try:
+            text = llm.ask(cfg, system, msgs, on_delta=printer, **FAST)
+        finally:
+            printer.done()
+        msgs.append({"role": "assistant", "content": text})
         s["transcript"] = msgs
-        if reply.get("action") == "propose":
-            mission, summary = reply["mission"], reply.get("summary", {})
-            say("\nProposed mission:", "h")
+        if text.lstrip().startswith(("MISSION", "{")):
+            try:
+                reply = llm.extract_json(text)
+                mission, summary = reply["mission"], reply.get("summary", {})
+            except (ValueError, KeyError, json.JSONDecodeError):
+                msgs.append({"role": "user", "content": "That proposal was not valid. Reply with MISSION "
+                                                        "on the first line, then the JSON object only."})
+                continue
+            say("Proposed mission:", "h")
             say(mission, "q")
             md = render_mission(mission, summary)
             say(md.split("## Problem", 1)[1] if "## Problem" in md else "", "dim")
@@ -279,10 +320,6 @@ def interview(cfg, s: Session, name: str, seed: str):
             msgs.append({"role": "user", "content": f"The owner does not accept that mission: {ans}. "
                                                     "Keep interviewing to resolve it, then propose again."})
             continue
-        say(f"\n{reply.get('question', '').strip()}", "q")
-        covered = reply.get("covered") or []
-        if covered:
-            say(f"covered: {', '.join(covered)}", "dim")
         ans = prompt()
         if ans == "/quit":
             raise KeyboardInterrupt
@@ -297,7 +334,7 @@ def _review(s: Session, key: str, label: str, generate):
     if s[key]:
         return
     while True:
-        say(f"\nDrafting {label} (this takes a minute)...", "dim")
+        print()
         md = generate()
         say(md)
         ans = input(f"[e]dit / [a]ccept / [r]egenerate {label}? [e] ").strip().lower() or "e"
@@ -314,7 +351,8 @@ def features(cfg, s: Session, seed: str):
     ctx = _context(s) + (f"\nREPOSITORY:\n{seed}" if seed else "")
     def gen():
         items, _ = model_json(cfg, "You are a precise product analyst.",
-                              [{"role": "user", "content": FEATURES_PROMPT.format(context=ctx, status=status)}], **FAST)
+                              [{"role": "user", "content": FEATURES_PROMPT.format(context=ctx, status=status)}],
+                              label="drafting features", **FAST)
         return render_features(items)
     _review(s, "features_md", "features", gen)
 
@@ -324,7 +362,8 @@ def stories(cfg, s: Session, seed: str):
     def gen():
         items, _ = model_json(cfg, "You are a precise product analyst.",
                               [{"role": "user", "content": STORIES_PROMPT.format(
-                                  context=_context(s), features=s["features_md"], status=status)}], **FAST)
+                                  context=_context(s), features=s["features_md"], status=status)}],
+                              label="drafting user stories", **FAST)
         return render_stories(items)
     _review(s, "stories_md", "user stories", gen)
 
@@ -345,7 +384,8 @@ def choose_stack(cfg, s: Session, repo: Path, seed: str):
     while True:
         pick, _ = model_json(cfg, "You are a pragmatic senior engineer.",
                              [{"role": "user", "content": STACK_PROMPT.format(
-                                 prefs=prefs or "none", context=_context(s) + s["features_md"])}], **FAST)
+                                 prefs=prefs or "none", context=_context(s) + s["features_md"])}],
+                             label="choosing a stack", **FAST)
         say(f"\nProposal: {pick['stack']} — {pick['why']}", "h")
         if pick.get("libraries"):
             say("Libraries: " + ", ".join(pick["libraries"]), "dim")
@@ -367,7 +407,7 @@ def make_backlog(cfg, s: Session, seed: str):
         items, _ = model_json(cfg, "You are a senior engineer planning work for junior agents.",
                               [{"role": "user", "content": BACKLOG_PROMPT.format(
                                   stack=s["stack"], context=_context(s), stories=s["stories_md"],
-                                  existing=existing)}], **FAST)
+                                  existing=existing)}], label="drafting the backlog", **FAST)
         bl = backlog.Backlog()
         bl.sections["Todo"] = backlog.from_items(items)
         return bl.render()
@@ -508,12 +548,13 @@ def adopt_repo(cfg, s: Session, repo: Path):
     if not check.exists():
         ci = "\n".join(f"--- {p.name}\n{p.read_text()[:3000]}" for p in (repo / ".github" / "workflows").glob("*.y*ml"))
         detected = {k: [str(p) for p in v] for k, v in stacks.detect(repo).items()}
-        say("Drafting ./check from the repo's own tooling...", "dim")
+        printer = ui.StreamPrinter("drafting ./check", dim_content=True)
         text = llm.ask(cfg, "You write precise, minimal bash.",
                        [{"role": "user", "content": CHECK_PROMPT.format(
-                           detected=detected, make=_make_targets(repo), ci=ci or "(none)")}], **FAST)
+                           detected=detected, make=_make_targets(repo), ci=ci or "(none)")}],
+                       on_delta=printer, **FAST)
+        printer.done()
         script = text.split("```bash", 1)[-1].split("```", 1)[0].strip() + "\n"
-        say(script, "dim")
         if yes("Edit ./check before trying it?", default=False):
             script = edit(script, s.edit_dir / "check")
         check.write_text(script)

@@ -248,7 +248,7 @@ class Loop:
         res = agent.run(self.cfg, self.repo, prompt, name=f"foundry-{self.name}",
                         log=self.logs / f"{tag}.jsonl",
                         timeout_min=self.cfg["run"]["task_timeout"],
-                        token_budget=self.cfg["run"]["task_token_budget"])
+                        token_budget=self.cfg["run"]["task_token_budget"], label=tag)
         if not serve.healthy(self.cfg):
             # Infrastructure failure, not the model's: don't count the attempt.
             self.server_crashes = getattr(self, "server_crashes", 0) + 1
@@ -273,6 +273,7 @@ class Loop:
         elif not verdict.ok:
             failure = "guardrail: " + "; ".join(verdict.rejected)
         else:
+            print(f"[foundry] {tag}: guardrails ok ({len(changed)} files changed); running ./check", flush=True)
             ok, check_tail = agent.check(self.cfg, self.repo, name=f"foundry-{self.name}-check",
                                          log=self.logs / f"{tag}.check.log")
             if not ok:
@@ -336,7 +337,7 @@ class Loop:
         work.mkdir(exist_ok=True)
         (work / "summary.md").unlink(missing_ok=True)
         res = agent.run(self.cfg, self.repo, PLAN_PROMPT, name=f"foundry-{self.name}",
-                        log=self.logs / f"plan-{int(time.time())}.jsonl",
+                        log=self.logs / f"plan-{int(time.time())}.jsonl", label="planning",
                         timeout_min=self.cfg["run"]["task_timeout"],
                         token_budget=self.cfg["run"]["task_token_budget"])
         summary = (work / "summary.md").read_text() if (work / "summary.md").exists() else ""

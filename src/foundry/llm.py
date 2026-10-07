@@ -28,9 +28,50 @@ def chat(cfg: dict, messages: list[dict], *, thinking: bool | None = None,
         return json.load(resp)
 
 
-def ask(cfg: dict, system: str, messages: list[dict], **kw) -> str:
-    """Chat and return only the visible answer (thinking stripped)."""
-    resp = chat(cfg, [{"role": "system", "content": system}, *messages], **kw)
+def stream(cfg: dict, messages: list[dict], on_delta, *, thinking: bool | None = None,
+           max_tokens: int | None = None, timeout: int = 1800, **extra) -> str:
+    """Streaming completion. Calls on_delta(kind, text) with kind "reasoning" or "content"
+    as tokens arrive; returns the full content."""
+    thinking = cfg["model"]["thinking"] if thinking is None else thinking
+    body = {
+        "model": cfg["model"]["id"],
+        "messages": messages,
+        "max_tokens": max_tokens or cfg["model"]["max_output"],
+        **cfg["model"]["sampling"],
+        "chat_template_kwargs": {"enable_thinking": thinking},
+        **extra,
+        "stream": True,
+    }
+    req = urllib.request.Request(
+        config.base_url(cfg) + "/chat/completions",
+        data=json.dumps(body).encode(),
+        headers={"Content-Type": "application/json"},
+    )
+    content = []
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        for raw in resp:
+            line = raw.decode("utf-8", errors="replace").strip()
+            if not line.startswith("data:"):
+                continue
+            data = line[5:].strip()
+            if data == "[DONE]":
+                break
+            choices = json.loads(data).get("choices") or []
+            delta = choices[0].get("delta", {}) if choices else {}
+            if delta.get("reasoning"):
+                on_delta("reasoning", delta["reasoning"])
+            if delta.get("content"):
+                content.append(delta["content"])
+                on_delta("content", delta["content"])
+    return "".join(content)
+
+
+def ask(cfg: dict, system: str, messages: list[dict], on_delta=None, **kw) -> str:
+    """Chat and return only the visible answer (thinking stripped). Streams if on_delta is given."""
+    msgs = [{"role": "system", "content": system}, *messages]
+    if on_delta:
+        return strip_thinking(stream(cfg, msgs, on_delta, **kw))
+    resp = chat(cfg, msgs, **kw)
     return strip_thinking(resp["choices"][0]["message"].get("content") or "")
 
 

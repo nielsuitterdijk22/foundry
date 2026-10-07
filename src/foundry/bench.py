@@ -51,7 +51,8 @@ def main(cfg, args) -> int:
     agent.keep_awake()
     print(f"agent task running in {work} (cap {cfg['run']['task_timeout']} min)...", flush=True)
     res = agent.run(cfg, work, PROMPT, name="foundry-bench", log=work / "agent.jsonl",
-                    timeout_min=cfg["run"]["task_timeout"], token_budget=cfg["run"]["task_token_budget"])
+                    timeout_min=cfg["run"]["task_timeout"], token_budget=cfg["run"]["task_token_budget"],
+                    label="bench")
     if not serve.healthy(cfg):
         print(f"model server crashed during the task — see {config.state_dir(cfg) / 'server.log'}; "
               "restart with `foundry serve restart` and rerun")
