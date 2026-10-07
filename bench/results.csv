@@ -1,2 +1,3 @@
 date,model,thinking,prefill_tok_s,decode_tok_s,task,hidden_tests,minutes,steps,tokens_in,tokens_out,stopped
 2026-10-07T14:16,lmstudio-community/Qwen3.8-27B-MLX-4bit,False,399,15.1,fail,5/6,70.8,53,14859,11475,- (rescored; ~11 min of the run was the Mac asleep)
+2026-10-07T15:34,lmstudio-community/Qwen3.8-27B-MLX-4bit,False,467,16.9,fail,5/6,60.1,314,50835,39745,timeout

@@ -79,9 +79,9 @@ def main(cfg, args) -> int:
         "minutes": round(res.seconds / 60, 1), "steps": res.steps,
         "tokens_in": res.tokens_in, "tokens_out": res.tokens_out, "stopped": res.stopped or "-",
     }
-    out = config.ROOT / "bench" / "results.csv"
-    new = not out.exists()
-    with open(out, "a", newline="") as f:
+    results = config.ROOT / "bench" / "results.csv"
+    new = not results.exists()
+    with open(results, "a", newline="") as f:
         w = csv.DictWriter(f, fieldnames=list(row))
         if new:
             w.writeheader()
@@ -90,5 +90,5 @@ def main(cfg, args) -> int:
           f"{res.tokens_in:,} in / {res.tokens_out:,} out" + (f", stopped: {res.stopped}" if res.stopped else ""))
     if not passed:
         print("\n".join(out.splitlines()[-15:]))
-    print(f"logged to {out}; workdir {work}")
+    print(f"logged to {results}; workdir {work}")
     return 0 if passed else 1

@@ -251,11 +251,13 @@ def main(cfg: dict, mode: str, args: list[str]) -> int:
         sys.exit("model server is not running — `foundry serve start`")
     repo = config.repo_path(cfg, args[0])
     name = repo.name
-    if mode == "adopt":
-        _adopt_preflight(repo)
     s = Session(cfg, name, mode)
-    if s["mission"]:
-        say(f"Resuming {mode} of {name} (saved in {s.path}). Delete that file to start over.", "dim")
+    if mode == "adopt":
+        _adopt_preflight(repo, resuming=bool(s["backlog_md"]))
+    if len(s.d) > 1:
+        done = [k for k in ("mission_md", "features_md", "stories_md", "stack", "backlog_md") if s[k]]
+        say(f"Resuming {mode} of {name} — done so far: {', '.join(done) or 'part of the interview'}.\n"
+            f"(Saved in {s.path}; delete it to start over.)", "dim")
     seed = _seed(repo) if mode == "adopt" else ""
     try:
         interview(cfg, s, name, seed)
@@ -289,15 +291,23 @@ def interview(cfg, s: Session, name: str, seed: str):
     msgs = s["transcript"] or [{"role": "user", "content": "Start the interview."}]
     say(f"\nInterview for {name}. One question at a time. End a line with \\ to continue it.\n"
         "Commands: /done (propose the mission now), /quit (pause; resume later)\n", "dim")
+    pending = msgs[-1]["content"] if msgs[-1]["role"] == "assistant" else None
+    if pending:
+        say(f"(resuming — {sum(m['role'] == 'user' for m in msgs) - 1} answers so far)", "dim")
     while True:
         print()
-        printer = QuestionPrinter()
-        try:
-            text = llm.ask(cfg, system, msgs, on_delta=printer, **FAST)
-        finally:
-            printer.done()
-        msgs.append({"role": "assistant", "content": text})
-        s["transcript"] = msgs
+        if pending:  # resumed on an unanswered question: show it again
+            text, pending = pending, None
+            if not text.lstrip().startswith(("MISSION", "{")):
+                say(text, "q")
+        else:
+            printer = QuestionPrinter()
+            try:
+                text = llm.ask(cfg, system, msgs, on_delta=printer, **FAST)
+            finally:
+                printer.done()
+            msgs.append({"role": "assistant", "content": text})
+            s["transcript"] = msgs
         if text.lstrip().startswith(("MISSION", "{")):
             try:
                 reply = llm.extract_json(text)
@@ -319,6 +329,7 @@ def interview(cfg, s: Session, name: str, seed: str):
                 return
             msgs.append({"role": "user", "content": f"The owner does not accept that mission: {ans}. "
                                                     "Keep interviewing to resolve it, then propose again."})
+            s["transcript"] = msgs
             continue
         ans = prompt()
         if ans == "/quit":
@@ -327,6 +338,7 @@ def interview(cfg, s: Session, name: str, seed: str):
             ans = ("The owner wants to wrap up. Propose the mission now from what you have; "
                    "write 'TBD' where an answer is missing.")
         msgs.append({"role": "user", "content": ans or "(no answer — move on)"})
+        s["transcript"] = msgs  # saved before the model replies, so quitting never loses it
 
 
 def _review(s: Session, key: str, label: str, generate):
@@ -488,7 +500,8 @@ def create_repo(cfg, s: Session, repo: Path):
         sys.exit("./check failed on the fresh skeleton — fix the template and rerun (progress is saved)")
 
     git.git(repo, "add", "-A")
-    git.git(repo, "commit", "-m", f"foundry: scaffold {repo.name}")
+    if git.dirty(repo):  # nothing to commit when resuming after a failed push
+        git.git(repo, "commit", "-m", f"foundry: scaffold {repo.name}")
     git.ensure_deploy_key(cfg, slug)
     git.remote_op(cfg, repo, "push", "main:main")
     git.git(repo, "fetch", "origin", check=False)
@@ -498,10 +511,18 @@ def create_repo(cfg, s: Session, repo: Path):
 
 # ---------------------------------------------------------------- adopt
 
-def _adopt_preflight(repo: Path):
+# Files adopt writes; leftovers from an interrupted adopt don't block resuming it.
+ADOPT_FILES = {"MISSION.md", "FEATURES.md", "USER_STORIES.md", "BACKLOG.md", "DECISIONS.md",
+               "JOURNAL.md", "FEEDBACK.md", "AGENTS.md", "check", ".gitignore",
+               ".github/workflows/foundry-check.yml"}
+
+
+def _adopt_preflight(repo: Path, resuming: bool = False):
     if not (repo / ".git").exists():
         sys.exit(f"{repo} is not a git repo")
     dirty = git.dirty(repo)
+    if resuming:
+        dirty = [d for d in dirty if d not in ADOPT_FILES]
     if dirty:
         sys.exit(f"{repo.name} has {len(dirty)} uncommitted change(s), e.g. {', '.join(dirty[:5])}.\n"
                  "Commit or stash them first — foundry never touches uncommitted work.")
@@ -578,7 +599,8 @@ def adopt_repo(cfg, s: Session, repo: Path):
         bl.todo.insert(0, fix)
         backlog.save(repo, bl)
     git.git(repo, "add", "-A")
-    git.git(repo, "commit", "-m", "foundry: adopt — mission, features, stories, backlog, ./check")
+    if git.dirty(repo):  # nothing to commit when resuming after a failed push
+        git.git(repo, "commit", "-m", "foundry: adopt — mission, features, stories, backlog, ./check")
     git.ensure_deploy_key(cfg, slug)
     main = git.default_branch(repo)
     git.remote_op(cfg, repo, "push", f"{main}:{main}")
