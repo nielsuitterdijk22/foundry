@@ -10,8 +10,14 @@ USAGE = """usage: foundry <command> [args]
   bench                             run the fixed benchmark task, report tokens/s + pass/fail
   scaffold <name>                   interview → new private GitHub repo with all foundry files
   adopt <repo>                      bring an existing repo under foundry (interview seeded from it)
-  purge <name> [-y]                 forget a paused scaffold/adopt session (start over)
+  cto <suite> [repo ...]            one interview for a suite of products, then unattended: adopts
+                                    the repos that exist, creates the rest, starts the suite run.
+                                    Naming more repos later adds them. --review: approve each document;
+                                    --no-run: stop after setup
+  purge <name> [-y]                 forget a paused scaffold/adopt session
+  purge suite <suite> [-y]          forget a suite (repos are left alone)
   run <repo>                        work the backlog unattended (Ctrl-C stops cleanly)
+  run --suite <suite>               one loop across the suite's repos, respecting cross-repo Needs
   report <repo>                     write REPORT.md for the daily check-in
 """
 
@@ -32,6 +38,9 @@ def main() -> int:
     if cmd in ("scaffold", "adopt"):
         from . import scaffold
         return scaffold.main(cfg, cmd, rest)
+    if cmd == "cto":
+        from . import scaffold
+        return scaffold.cto(cfg, rest)
     if cmd == "purge":
         from . import scaffold
         return scaffold.purge(cfg, rest)

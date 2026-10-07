@@ -1,11 +1,12 @@
 """Unit tests for the parts of foundry that don't need a model or Docker."""
 
+import json
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 
-from foundry import backlog, guards, run, stacks
+from foundry import backlog, git, guards, llm, run, scaffold, showcase, stacks
 
 
 def sh(cwd, *args):
@@ -45,6 +46,13 @@ class GitRepo(unittest.TestCase):
         v = self.inspect(may_change=True)
         self.assertFalse(v.ok)
         self.assertIn("edits protected file MISSION.md", v.rejected)
+
+    def test_dirty_paths_intact(self):
+        (self.repo / "MISSION.md").write_text("# changed\n")  # " M MISSION.md" sorts first
+        (self.repo / "check").write_text("#!/bin/sh\nexit 0\n")
+        sh(self.repo, "git", "add", "check")
+        (self.repo / "new.txt").write_text("x")
+        self.assertEqual(sorted(git.dirty(self.repo)), ["MISSION.md", "check", "new.txt"])
 
     def test_deleting_protected_file_rejected(self):
         (self.repo / "MISSION.md").unlink()
@@ -101,6 +109,149 @@ class Backlog(unittest.TestCase):
         self.assertEqual([t.id for t in bl.sections["Done"]], ["T-001"])
         self.assertIn("- Parked: reason", bl.sections["Parked"][0].body)
         self.assertEqual(bl.next_id(), "T-003")
+
+
+class Suite(unittest.TestCase):
+    """Cross-repo Needs and turn-taking, on throwaway repos under a fake paths.repos."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.cfg = {"paths": {"repos": self.root, "state": self.root / ".state"}}
+        for name in ("Quill", "Tempo"):
+            sh(self.root, "git", "init", "-q", "-b", "main", name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def write(self, name, todo, done=()):
+        bl = backlog.Backlog()
+        bl.sections["Todo"] = backlog.from_items(todo)
+        for tid in done:
+            bl.sections["Done"].append(backlog.Task(tid, "done already"))
+        backlog.save(self.root / name, bl)
+
+    def test_needs_rendered_and_resolved_across_repos(self):
+        self.write("Quill", [{"title": "Auth API"}], done=["T-009"])
+        self.write("Tempo", [{"title": "Use auth", "needs": ["Quill/T-001", "Quill/T-009"]},
+                             {"title": "Local", "needs": "T-001"},
+                             {"title": "Free", "needs": []},
+                             {"title": "Elsewhere", "needs": ["Nowhere/T-001"]}])
+        tempo = backlog.load(self.root / "Tempo").todo
+        self.assertEqual(tempo[0].field("Needs"), "Quill/T-001, Quill/T-009")
+        self.assertEqual(tempo[2].field("Needs"), "")
+        self.assertEqual(run.unmet(self.cfg, self.root / "Tempo", tempo[0]), ["Quill/T-001"])
+        self.assertEqual(run.unmet(self.cfg, self.root / "Tempo", tempo[1]), ["T-001"])
+        self.assertEqual(run.unmet(self.cfg, self.root / "Tempo", tempo[3]), [])  # unmanaged repo: ignored
+
+    def test_next_task_skips_waiting_and_blocks_when_all_wait(self):
+        self.write("Quill", [{"title": "Auth API"}])
+        self.write("Tempo", [{"title": "Use auth", "needs": ["Quill/T-001"]}, {"title": "Free"}])
+        tempo = run.Loop(self.cfg, self.root / "Tempo")
+        self.assertEqual(tempo.next_task(backlog.load(tempo.repo)).title, "Free")
+        self.write("Tempo", [{"title": "Use auth", "needs": ["Quill/T-001"]}])
+        self.assertFalse(tempo.ready())
+        with self.assertRaises(run.Blocked):
+            tempo.next_task(backlog.load(tempo.repo))
+        self.write("Quill", [], done=["T-001"])
+        self.assertTrue(tempo.ready())
+
+    def test_suite_wires_peers(self):
+        suite = run.Suite(self.cfg, [self.root / "Quill", self.root / "Tempo"])
+        self.assertEqual([p.name for p in suite.loops[0].peers], ["Tempo"])
+
+
+class Showcase(unittest.TestCase):
+    def test_render(self):
+        from datetime import datetime
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            cfg = {"paths": {"repos": root, "state": root / ".state"}}
+            sh(root, "git", "init", "-q", "-b", "main", "Quill")
+            sh(root / "Quill", "git", "remote", "add", "origin", "https://github.com/me/Quill.git")
+            (root / "Quill" / ".github" / "workflows").mkdir(parents=True)
+            (root / "Quill" / ".github" / "workflows" / "foundry-check.yml").write_text("x")
+            bl = backlog.Backlog()
+            bl.sections["Todo"] = backlog.from_items([{"title": "Next"}])
+            bl.sections["Parked"] = [backlog.Task("T-002", "Hard one", "- Parked: 2026-10-07 after 3 attempts — ./check failed\n")]
+            backlog.save(root / "Quill", bl)
+            demo = root / "demo.log"
+            demo.write_text("$ curl /api/repos\n[{\"name\": \"x\"}]\n")
+            metrics = (root / ".state" / "metrics")
+            metrics.mkdir(parents=True)
+            (metrics / "quill.jsonl").write_text("\n".join(json.dumps(e) for e in [
+                {"ts": "2026-10-07T10:00:00", "outcome": "merged", "task": "T-001", "title": "List repos",
+                 "sha": "abc1234", "attempt": 1, "seconds": 600, "done": "- added GET /api/repos",
+                 "questions": "Should archived repos show?", "demo": "ok", "demo_log": str(demo)},
+                {"ts": "2026-10-07T11:00:00", "outcome": "parked", "task": "T-002", "reason": "./check failed"},
+                {"ts": "2026-10-07T11:30:00", "outcome": "stopped", "reason": "local main and GitHub main have diverged"},
+            ]) + "\n")
+            (metrics / "gone.jsonl").write_text(json.dumps({"ts": "2026-10-01T10:00:00", "outcome": "merged"}) + "\n")
+            md = showcase.render(cfg, datetime(2026, 10, 7, 12, 0))
+        self.assertIn("**Quill** stopped 30 min ago: local main and GitHub main have diverged", md)
+        self.assertIn("**Quill** parked T-002: Hard one", md)
+        self.assertIn("**Quill** T-001 asks: Should archived repos show?", md)
+        self.assertIn("| [Quill](https://github.com/me/Quill) [![check](https://github.com/me/Quill/actions/workflows/"
+                      "foundry-check.yml/badge.svg)]", md)
+        self.assertIn("| 0 | 1 | 1 | 2 h ago | ⏸ stopped |", md)
+        self.assertIn("### Quill · T-001: List repos", md)
+        self.assertIn("[`abc1234`](https://github.com/me/Quill/commit/abc1234)", md)
+        self.assertIn('▶️ Demo</summary>\n\n```text\n$ curl /api/repos', md)
+        self.assertNotIn("gone", md.lower())
+
+
+class Interview(unittest.TestCase):
+    def test_classify_replies(self):
+        self.assertEqual(scaffold._classify("Who pays?"), ("question", "Who pays?"))
+        self.assertEqual(scaffold._classify('{"action": "ask", "question": "Who pays?"}'),
+                         ("question", "Who pays?"))
+        kind, (mission, summary) = scaffold._classify('MISSION\n{"mission": "A. B.", "summary": {"users": "x"}}')
+        self.assertEqual((kind, mission, summary), ("mission", "A. B.", {"users": "x"}))
+        self.assertEqual(scaffold._classify('MISSION\n{"mission": "A.'), ("bad", None))
+
+    def test_normalize_drops_failed_proposals(self):
+        q = '{"action": "ask", "question": "Shared instance?"}'
+        msgs = [{"role": "user", "content": "Start the interview."}, {"role": "assistant", "content": q},
+                {"role": "user", "content": scaffold.BAD_PROPOSAL + " Again."},
+                {"role": "assistant", "content": q}]
+        self.assertEqual(scaffold._normalize(msgs)[1:], [{"role": "assistant", "content": "Shared instance?"}])
+        self.assertEqual(scaffold._qa(msgs), "Q: Shared instance?")
+
+    def test_missing_closing_braces_repaired(self):
+        self.assertEqual(llm.extract_json('MISSION\n{"mission": "a {b}", "summary": {"x": ["]"]'),
+                         {"mission": "a {b}", "summary": {"x": ["]"]}})
+        self.assertIsNone(llm.close_brackets('{"a": "open string'))
+        self.assertIsNone(llm.close_brackets('{"a": [1}'))
+        with self.assertRaises(json.JSONDecodeError):
+            llm.extract_json('{"a": 1,, "b": 2}')
+
+    def test_normalize_keeps_repairable_proposal(self):
+        prop = 'MISSION\n{"mission": "A. B.", "summary": {"users": "x"}'
+        msgs = [{"role": "user", "content": "Start the interview."}, {"role": "assistant", "content": "Q?"},
+                {"role": "user", "content": "okay"}, {"role": "assistant", "content": prop},
+                {"role": "user", "content": scaffold.BAD_PROPOSAL + " Again."},
+                {"role": "assistant", "content": prop + " "},
+                {"role": "user", "content": scaffold.BAD_PROPOSAL + " Again."}]
+        out = scaffold._normalize(msgs)
+        self.assertEqual([m["role"] for m in out], ["user", "assistant", "user", "assistant"])
+        self.assertEqual(scaffold._classify(out[-1]["content"])[0], "mission")
+
+    def test_cto_prompt_marks_new_products(self):
+        with tempfile.TemporaryDirectory() as d:
+            cfg = {"paths": {"state": Path(d)}}
+            text = scaffold._cto_system(cfg, {"Quill": "# Quill readme", "Ledger": ""})
+        self.assertIn("own repository: Quill, Ledger.", " ".join(text.split()))
+        self.assertIn("=== Repository Quill\n# Quill readme", text)
+        self.assertIn("=== Ledger: a NEW product, no repository yet", text)
+
+    def test_prompts_format(self):
+        sys_prompt = scaffold.CTO_INTERVIEWER.format(products="Quill, Tempo", seed="")
+        self.assertIn('{"mission"', sys_prompt)
+        scaffold.PRODUCT_MISSION_PROMPT.format(name="Quill", suite="", answers="", seed="")
+        scaffold.BACKLOG_PROMPT.format(stack="go", context="", stories="", existing="", peers="", needs="")
+        md = scaffold.render_suite("V1. V2.", {"products": [{"name": "Quill", "role": "git"}], "shared": ["Entra SSO"]})
+        self.assertIn("- **Quill**: git", md)
+        self.assertIn("- Entra SSO", md)
 
 
 class Misc(unittest.TestCase):

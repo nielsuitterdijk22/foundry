@@ -5,11 +5,12 @@ ones marked **(enforced)**: breaking them throws the work away.
 
 ## Read order, every session
 1. `FEEDBACK.md`: the owner's latest feedback. It overrides everything except the mission.
-2. `MISSION.md`, then this file, then `DECISIONS.md`.
+2. `SUITE.md` (if present: the product family this repo belongs to), `MISSION.md`,
+   then this file, then `DECISIONS.md`.
 3. Your task (in `.foundry/task.md` when run by foundry, otherwise the top of `BACKLOG.md`).
 
 ## Owner documents
-- `MISSION.md`, `FEATURES.md`, `USER_STORIES.md` belong to the owner. Never edit them. **(enforced)**
+- `SUITE.md`, `MISSION.md`, `FEATURES.md`, `USER_STORIES.md` belong to the owner. Never edit them. **(enforced)**
 - `BACKLOG.md` and `JOURNAL.md` are maintained by the foundry loop; don't edit them during a task.
 - `FEEDBACK.md` is written by the owner; read it, don't edit it.
 

@@ -89,7 +89,9 @@ def default_branch(repo: Path) -> str:
 def dirty(repo: Path) -> list[str]:
     """Changed or untracked paths (porcelain), ignoring .foundry/."""
     out = git(repo, "status", "--porcelain", "--untracked-files=all")
-    paths = [line[3:].split(" -> ")[-1] for line in out.splitlines()]
+    # git() strips the output, which eats the first line's leading space (" M path"), so don't
+    # slice a fixed width: skip the two status columns and the separator, whatever is left of them.
+    paths = [line[2:].lstrip().split(" -> ")[-1] for line in out.splitlines()]
     return [p for p in paths if not p.startswith(".foundry/")]
 
 

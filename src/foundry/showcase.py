@@ -1,0 +1,152 @@
+"""The showcase: one page the owner checks instead of watching the loops.
+
+After every iteration the README of a private GitHub repo (default `<owner>/foundry-showcase`)
+is regenerated from the metrics of every foundry repo: what needs the owner, each product's
+status, and the latest merged work with the real output of its demo. A local copy lives in
+~/.foundry/showcase/README.md. Publishing never stops a loop: on any error it warns and moves on.
+"""
+
+import json
+import subprocess
+from datetime import datetime, timedelta
+from pathlib import Path
+
+from . import backlog, config, git
+
+LATEST = 25        # merged/parked entries shown, newest first
+WITH_DEMO = 8      # of those, how many show their demo output inline
+DEMO_CHARS = 2500  # demo output shown per entry (the tail, where results usually are)
+
+
+def publish(cfg: dict) -> None:
+    try:
+        d = config.state_dir(cfg, "showcase")
+        (d / "README.md").write_text(render(cfg, datetime.now()))
+        _push(cfg, d)
+    except Exception as e:  # noqa: BLE001 — the showcase must never take a loop down
+        print(f"[foundry] showcase not published: {str(e).strip().splitlines()[0] if str(e).strip() else type(e).__name__}",
+              flush=True)
+
+
+def _events(cfg) -> dict[str, list[dict]]:
+    out = {}
+    for f in sorted(config.state_dir(cfg, "metrics").glob("*.jsonl")):
+        out[f.stem] = [json.loads(line) for line in f.read_text().splitlines() if line.strip()]
+    return out
+
+
+def _repo_info(cfg, name: str) -> tuple[str, Path | None, str]:
+    """(display name, repo path or None, owner/name slug or '')."""
+    repo = config.repo_path(cfg, name)
+    if not (repo / ".git").exists():
+        return name, None, ""
+    try:
+        slug = git.slug(repo)
+    except RuntimeError:
+        return repo.name, repo, ""
+    return slug.split("/", 1)[1], repo, slug  # the path keeps whatever case it was typed in
+
+
+def _badge(repo: Path, slug: str) -> str:
+    for wf in ("foundry-check.yml", "check.yml"):
+        if slug and (repo / ".github" / "workflows" / wf).exists():
+            url = f"https://github.com/{slug}/actions/workflows/{wf}"
+            return f"[![check]({url}/badge.svg)]({url})"
+    return ""
+
+
+def _when(ts: str, now: datetime) -> str:
+    t = datetime.fromisoformat(ts)
+    mins = int((now - t).total_seconds() // 60)
+    if mins < 60:
+        return f"{mins} min ago"
+    if mins < 24 * 60:
+        return f"{mins // 60} h ago"
+    return t.strftime("%Y-%m-%d %H:%M")
+
+
+def _real(text: str | None) -> str:
+    text = (text or "").strip()
+    return "" if text.lower() in ("", "none", "- none", "none.") else text
+
+
+def render(cfg: dict, now: datetime) -> str:
+    events = _events(cfg)
+    info = {name: _repo_info(cfg, name) for name in events}
+    needs, rows, latest = [], [], []
+    week = now - timedelta(days=7)
+
+    for name, evs in events.items():
+        display, repo, slug = info[name]
+        last = evs[-1] if evs else {}
+        if not repo and last.get("outcome") != "stopped":
+            continue  # an old experiment whose repo is gone
+        bl = backlog.load(repo) if repo else backlog.Backlog()
+        if last.get("outcome") == "stopped":
+            needs.append(f"- **{display}** stopped {_when(last['ts'], now)}: {last.get('reason', '')}")
+        for t in bl.sections["Parked"]:
+            note = next((ln[2:] for ln in t.body.splitlines() if ln.startswith("- Parked:")), "")
+            needs.append(f"- **{display}** parked {t.id}: {t.title} — {note.removeprefix('Parked: ')[:300]}")
+        for e in evs:
+            if e.get("outcome") == "merged" and datetime.fromisoformat(e["ts"]) >= week and _real(e.get("questions")):
+                needs.append(f"- **{display}** {e['task']} asks: {_real(e['questions'])[:500]}")
+        merged = [e for e in evs if e.get("outcome") == "merged"]
+        state = ("⏸ stopped" if last.get("outcome") == "stopped" else
+                 f"working on {bl.todo[0].id}" if bl.todo else "planning next work") if repo else "not set up"
+        rows.append(f"| {f'[{display}](https://github.com/{slug})' if slug else display} {_badge(repo, slug) if repo else ''} "
+                    f"| {len(bl.sections['Done'])} | {len(bl.todo)} | {len(bl.sections['Parked'])} "
+                    f"| {_when(merged[-1]['ts'], now) if merged else '—'} | {state} |")
+        latest += [(e, display, slug) for e in evs if e.get("outcome") in ("merged", "parked")]
+
+    latest.sort(key=lambda x: x[0]["ts"], reverse=True)
+    out = ["# Foundry showcase\n",
+           f"Updated {now:%Y-%m-%d %H:%M}. Agents keep working while you read this; "
+           "write feedback in a product's FEEDBACK.md and the loop picks it up.\n",
+           "\n## Needs you\n", *(f"{n}\n" for n in needs), "" if needs else "Nothing. 🎉\n",
+           "\n## Products\n",
+           "| Product | Done | Todo | Parked | Last merge | Now |\n|---|---|---|---|---|---|\n",
+           *(f"{r}\n" for r in rows),
+           "\n## Latest work\n"]
+    if not latest:
+        out.append("Nothing merged yet.\n")
+    for i, (e, display, slug) in enumerate(latest[:LATEST]):
+        if e["outcome"] == "parked":
+            out.append(f"\n### ⏸ {display} · {e['task']} parked · {_when(e['ts'], now)}\n{e.get('reason', '')}\n")
+            continue
+        sha = f"[`{e['sha']}`](https://github.com/{slug}/commit/{e['sha']})" if slug else f"`{e['sha']}`"
+        out.append(f"\n### {display} · {e['task']}: {e['title']}\n"
+                   f"{_when(e['ts'], now)} · {sha} · attempt {e.get('attempt', '?')} · {e.get('seconds', 0) // 60} min\n\n")
+        if _real(e.get("done")):
+            out.append(_real(e["done"]) + "\n")
+        log = Path(e["demo_log"]) if e.get("demo_log") else None
+        if i < WITH_DEMO and log and log.exists():
+            text = log.read_text(errors="replace").strip()
+            text = ("…\n" + text[-DEMO_CHARS:]) if len(text) > DEMO_CHARS else text
+            mark = "▶️ Demo" if e.get("demo") == "ok" else "⚠️ Demo (exited with an error)"
+            out.append(f"\n<details open><summary>{mark}</summary>\n\n```text\n{text.replace('```', 'ʼʼʼ')}\n```\n</details>\n")
+        elif e.get("demo") == "none":
+            out.append("\n_No demo for this one._\n")
+    return "".join(out)
+
+
+def _push(cfg, d: Path):
+    """Commit README.md and push it to the showcase repo, creating that repo the first time."""
+    name = (cfg.get("showcase") or {}).get("repo") or "foundry-showcase"
+    if not (d / ".git").exists():
+        owner = cfg["github"]["owner"] or subprocess.run(
+            ["gh", "api", "user", "--jq", ".login"], check=True, capture_output=True, text=True).stdout.strip()
+        slug = f"{owner}/{name}"
+        if subprocess.run(["gh", "repo", "view", slug], capture_output=True).returncode != 0:
+            subprocess.run(["gh", "repo", "create", slug, "--private",
+                            "--description", "What the foundry agents built lately (generated)"],
+                           check=True, capture_output=True)
+            print(f"[foundry] created https://github.com/{slug} — your showcase", flush=True)
+        git.git(d, "init", "-b", "main")
+        git.git(d, "remote", "add", "origin", f"https://github.com/{slug}.git")
+        git.ensure_deploy_key(cfg, slug)
+    git.git(d, "add", "README.md")
+    if not git.dirty(d):
+        return
+    git.git(d, "-c", "user.name=foundry", "-c", "user.email=foundry@localhost",
+            "commit", "-qm", "showcase update")
+    git.remote_op(cfg, d, "push", "--force", "main:main")  # generated content: the latest wins

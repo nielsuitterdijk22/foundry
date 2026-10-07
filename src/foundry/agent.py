@@ -134,16 +134,22 @@ def keep_awake() -> subprocess.Popen:
 
 def check(cfg: dict, repo: Path, *, name: str, log: Path) -> tuple[bool, str]:
     """Runs ./check in a fresh sandbox. Returns (passed, output tail)."""
-    argv = sandbox.run_cmd(cfg, repo, ["bash", "./check"], name=name)
-    status = ui.Status("running ./check")
+    return in_sandbox(cfg, repo, ["bash", "./check"], name=name, log=log,
+                      timeout_s=cfg["run"]["check_timeout"] * 60, label="running ./check")
+
+
+def in_sandbox(cfg: dict, repo: Path, cmd: list[str], *, name: str, log: Path, timeout_s: float,
+               label: str) -> tuple[bool, str]:
+    """Runs cmd in a fresh sandbox. Returns (exit 0, output tail); the full output goes to log."""
+    argv = sandbox.run_cmd(cfg, repo, cmd, name=name)
+    status = ui.Status(label)
     try:
-        r = subprocess.run(argv, capture_output=True, text=True,
-                           timeout=cfg["run"]["check_timeout"] * 60)
+        r = subprocess.run(argv, capture_output=True, text=True, timeout=timeout_s)
         out, ok = r.stdout + r.stderr, r.returncode == 0
     except subprocess.TimeoutExpired as e:
         sandbox.kill(name)
         out = (e.stdout or b"").decode(errors="replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
-        out, ok = out + "\n[foundry] ./check timed out", False
+        out, ok = out + f"\n[foundry] {cmd[-1]} timed out", False
     finally:
         status.stop()
     log.write_text(out)

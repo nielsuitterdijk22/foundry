@@ -33,7 +33,7 @@ max_attempts = 3                   # failed attempts before a task is parked
 task_timeout = 60                  # wall-clock cap per attempt
 task_token_budget = 1_500_000      # new tokens processed per attempt (uncached input + output)
 check_timeout = 20                 # cap for one ./check run
-protected = ["MISSION.md", "FEATURES.md", "USER_STORIES.md"]
+protected = ["SUITE.md", "MISSION.md", "FEATURES.md", "USER_STORIES.md"]
 
 [sandbox]
 image = "foundry-agent"
@@ -51,6 +51,12 @@ allow = [
   # Python (for tooling some projects use)
   "pypi.org", "files.pythonhosted.org",
 ]
+
+[showcase]
+# Private GitHub repo (under github.owner) whose README is regenerated after every iteration:
+# what needs you, product status, latest merges with real demo output. Local copy:
+# ~/.foundry/showcase/README.md. Created on first publish.
+repo = "foundry-showcase"
 
 [github]
 owner = ""                         # empty = the account `gh` is logged in as

@@ -6,13 +6,14 @@ on the host. The agent only edits files in the sandbox.
 
 import json
 import os
+import re
 import signal
 import sys
 import time
 from datetime import datetime
 from pathlib import Path
 
-from . import agent, backlog, config, git, guards, sandbox, serve
+from . import agent, backlog, config, git, guards, sandbox, serve, showcase
 
 LOOP_OWNED = ["BACKLOG.md", "JOURNAL.md", "FEEDBACK.md"]  # restored if the agent edits them
 
@@ -23,7 +24,8 @@ Your job this session is exactly one task: {id}: {title}
 
 Before changing anything, read in this order:
 1. FEEDBACK.md: the owner's latest feedback. It overrides everything except MISSION.md.
-2. MISSION.md, then AGENTS.md (working rules), then DECISIONS.md.
+2. SUITE.md if it exists (the product family this repo belongs to), MISSION.md,
+   then AGENTS.md (working rules), then DECISIONS.md.
 3. .foundry/task.md: your task, its acceptance check, and notes from earlier failed attempts.
 
 Then:
@@ -31,13 +33,18 @@ Then:
 2. Implement until they pass. Keep the change small and focused on this task.
 3. Run ./check and fix everything it reports until it exits 0.
 4. Append any non-obvious design decision to DECISIONS.md (date, decision, why).
-5. Write .foundry/summary.md with these sections:
+5. Write .foundry/demo.sh: a short bash script that shows the owner this change working from the
+   outside — run the CLI, or start the server in the background, curl the new endpoint and stop
+   it; only as a last resort run the new tests verbosely. The harness runs it in this sandbox
+   after ./check, with a 3-minute limit, and shows its output to the owner. Print real results
+   with a one-line caption before each; never echo canned output.
+6. Write .foundry/summary.md with these sections:
    ## Done (2-5 bullets: what changed and where)
    ## Questions (anything the owner should decide; "none" if nothing)
    ## Follow-ups (work you noticed but did not do; "none" if nothing)
 
 Hard rules, enforced by the harness (violations discard all your work):
-- Never edit MISSION.md, FEATURES.md or USER_STORIES.md.
+- Never edit SUITE.md, MISSION.md, FEATURES.md or USER_STORIES.md.
 - Never delete, skip or weaken existing tests or assertions{tests_clause}, and never change
   ./check, CI workflows or linter/type-checker configuration.
 - Do not run git commands that change anything (commit, checkout, reset, stash); the harness owns git.
@@ -46,8 +53,9 @@ Hard rules, enforced by the harness (violations discard all your work):
 
 PLAN_PROMPT = """You are the planner for the project in /work. No human is available; never ask questions.
 
-The backlog is empty. Read FEEDBACK.md first, then MISSION.md, FEATURES.md, USER_STORIES.md,
-DECISIONS.md, the last entries of JOURNAL.md, and enough of the code to know what exists.
+The backlog is empty. Read FEEDBACK.md first, then SUITE.md (if present), MISSION.md, FEATURES.md,
+USER_STORIES.md, DECISIONS.md, the last entries of JOURNAL.md, and enough of the code to know what
+exists. If .foundry/suite.md exists, it lists the other products' backlogs.
 
 Then append 3-8 new tasks under "## Todo" in BACKLOG.md that move the project toward the
 user stories that are not yet satisfied, most valuable first. Each task must be small enough
@@ -57,6 +65,7 @@ for one focused session and use exactly this format:
 - Story: <US-id(s)>
 - Accept: <a concrete check: test names to add or a command and its expected result>
 - Tests may change: no
+- Needs: <tasks that must be Done first: T-NNN here, or Product/T-NNN from .foundry/suite.md; "none">
 <2-5 lines of detail: files to touch, edge cases>
 
 Continue numbering after the highest existing T-number. Only edit BACKLOG.md.
@@ -68,9 +77,44 @@ class Stop(Exception):
     pass
 
 
+class Blocked(Stop):
+    """Every Todo task waits on another task (possibly in another repo) that isn't Done."""
+
+
+class Fatal(Stop):
+    """Stops the whole suite, not just one repo (the model server is down)."""
+
+
+def unmet(cfg: dict, repo: Path, task: backlog.Task) -> list[str]:
+    """The task's Needs (T-NNN in this repo, Product/T-NNN in another) that aren't Done yet.
+    A reference to a repo foundry doesn't manage is ignored rather than blocking forever."""
+    out = []
+    for name, tid in re.findall(r"(?:([\w.-]+)/)?(T-\d+)", task.field("Needs")):
+        other = config.repo_path(cfg, name) if name else repo
+        if not (other / "BACKLOG.md").exists():
+            continue
+        if tid not in {t.id for t in backlog.load(other).sections["Done"]}:
+            out.append(f"{name}/{tid}" if name else tid)
+    return out
+
+
 def main(cfg: dict, args: list[str]) -> int:
+    if "--suite" in args:
+        rest = args[args.index("--suite") + 1:]
+        if not rest or rest[0].startswith("-"):
+            sys.exit("usage: foundry run --suite <suite> [--once]")
+        path = config.state_dir(cfg, "suites") / f"{rest[0].lower()}.json"
+        if not path.exists():
+            sys.exit(f"no suite {rest[0]} — create it with `foundry cto {rest[0]} <repo> ...`")
+        suite = json.loads(path.read_text())
+        ready = suite.get("adopted") or []
+        if waiting := [n for n in suite.get("repos", []) if n not in ready]:
+            print(f"[foundry] not set up yet (finish `foundry cto {rest[0]}`): {', '.join(waiting)}")
+        if not ready:
+            sys.exit("no products in this suite are set up yet")
+        return Suite(cfg, [config.repo_path(cfg, n) for n in ready], once="--once" in args).run()
     if not args:
-        sys.exit("usage: foundry run <repo> [--once]")
+        sys.exit("usage: foundry run <repo> [--once] | foundry run --suite <suite> [--once]")
     repo = config.repo_path(cfg, args[0])
     if not (repo / "MISSION.md").exists():
         sys.exit(f"{repo} is not a foundry repo (no MISSION.md); use scaffold or adopt")
@@ -86,6 +130,7 @@ class Loop:
         self.logs = config.state_dir(cfg, "logs", self.name)
         self.lock = config.state_dir(cfg, "locks") / f"{self.name}.lock"
         self.main = git.default_branch(repo)
+        self.peers: list[Path] = []  # other suite repos, shown to the planner
 
     # ---------- lifecycle ----------
 
@@ -97,6 +142,7 @@ class Loop:
             self._preflight()
             while True:
                 self._iteration()
+                showcase.publish(self.cfg)
                 if self.once:
                     break
         except KeyboardInterrupt:
@@ -104,6 +150,7 @@ class Loop:
             self._abort_attempt(count=False)
         except Stop as e:
             print(f"[foundry] stopped: {e}")
+            self.stopped(str(e))
         except Exception:
             # Unexpected bug: leave the repo on main, count the attempt, and surface the error.
             self._abort_attempt(count=True)
@@ -124,7 +171,7 @@ class Loop:
 
     def _preflight(self):
         if not serve.healthy(self.cfg):
-            raise Stop("model server is not running — `foundry serve start`")
+            raise Fatal("model server is not running — `foundry serve start`")
         sandbox.ensure_proxy(self.cfg)
         st = self._state()
         if st.get("merged"):
@@ -222,7 +269,7 @@ class Loop:
         if not bl.todo:
             self._plan()
             return
-        task = bl.todo[0]
+        task = self.next_task(bl)
         st = self._state()
         if st.get("task") != task.id:
             st = {"task": task.id, "attempt": 0, "notes": []}
@@ -237,6 +284,7 @@ class Loop:
         work = self.repo / ".foundry"
         work.mkdir(exist_ok=True)
         (work / "summary.md").unlink(missing_ok=True)
+        (work / "demo.sh").unlink(missing_ok=True)
         notes = "\n".join(f"- {x}" for x in st["notes"]) or "- none (first attempt)"
         (work / "task.md").write_text(f"{task.render()}\n## Earlier attempts\n{notes}\n")
 
@@ -256,7 +304,7 @@ class Loop:
             self._metric(outcome="server_crash", task=task.id, attempt=n, seconds=round(res.seconds))
             self._abort_attempt(count=False)
             if self.server_crashes >= 3:
-                raise Stop("model server crashed 3 times — see ~/.foundry/server.log")
+                raise Fatal("model server crashed 3 times — see ~/.foundry/server.log")
             return
         self.server_crashes = 0
         summary = (work / "summary.md").read_text() if (work / "summary.md").exists() else ""
@@ -278,12 +326,14 @@ class Loop:
                                          log=self.logs / f"{tag}.check.log")
             if not ok:
                 failure = "./check failed"
+        demo = self._demo(tag) if not failure else {}
 
         metric = dict(task=task.id, title=task.title, attempt=n, tokens_in=res.tokens_in,
                       tokens_out=res.tokens_out, tokens_cached=res.tokens_cached,
                       seconds=round(res.seconds), steps=res.steps, out_tok_s=round(res.out_tok_s, 1),
                       flagged=verdict.flagged, questions=_section(summary, "Questions"),
-                      followups=_section(summary, "Follow-ups"))
+                      followups=_section(summary, "Follow-ups"), done=_section(summary, "Done")[:1500],
+                      **demo)
         if failure:
             print(f"[foundry] {tag} failed: {failure}", flush=True)
             last = (check_tail.splitlines()[-15:] if check_tail else [])
@@ -317,6 +367,46 @@ class Loop:
         self._metric(outcome="merged", sha=sha, **metric)
         print(f"[foundry] {task.id} merged as {sha}", flush=True)
 
+    def next_task(self, bl: backlog.Backlog) -> backlog.Task:
+        """The first Todo task whose Needs are all Done."""
+        waiting = []
+        for t in bl.todo:
+            if not (needs := unmet(self.cfg, self.repo, t)):
+                return t
+            waiting.append(f"{t.id} needs {', '.join(needs)}")
+        raise Blocked(f"{self.name}: every Todo task is waiting — " + "; ".join(waiting))
+
+    def ready(self) -> bool:
+        """Is there work here right now: a task that can start, or an empty backlog to plan?"""
+        bl = backlog.load(self.repo)
+        try:
+            return not bl.todo or bool(self.next_task(bl))
+        except Blocked:
+            return False
+
+    def _write_peers(self, work: Path):
+        out = ["# Other products in the suite\n\nReference their tasks in Needs as Product/T-NNN.\n"]
+        for peer in self.peers:
+            bl = backlog.load(peer)
+            out.append(f"\n## {peer.name}\n")
+            out += [f"- {peer.name}/{t.id} (todo): {t.title}\n" for t in bl.todo]
+            out += [f"- {peer.name}/{t.id} (done): {t.title}\n" for t in bl.sections["Done"][:15]]
+        (work / "suite.md").write_text("".join(out))
+
+    def _demo(self, tag: str) -> dict:
+        """Run the agent's .foundry/demo.sh in the sandbox; its real output is the show-off."""
+        if not (self.repo / ".foundry" / "demo.sh").exists():
+            return {"demo": "none"}
+        log = self.logs / f"{tag}.demo.log"
+        ok, _ = agent.in_sandbox(self.cfg, self.repo, ["bash", ".foundry/demo.sh"],
+                                 name=f"foundry-{self.name}-demo", log=log, timeout_s=180, label="running the demo")
+        print(f"[foundry] {tag}: demo {'ran' if ok else 'failed'} ({log})", flush=True)
+        return {"demo": "ok" if ok else "failed", "demo_log": str(log)}
+
+    def stopped(self, reason: str):
+        self._metric(outcome="stopped", reason=reason)
+        showcase.publish(self.cfg)
+
     def _park(self, st: dict, reason: str):
         bl = backlog.load(self.repo)
         tried = " | ".join(x.split(". Agent summary")[0] for x in st.get("notes", []))
@@ -336,6 +426,8 @@ class Loop:
         work = self.repo / ".foundry"
         work.mkdir(exist_ok=True)
         (work / "summary.md").unlink(missing_ok=True)
+        if self.peers:
+            self._write_peers(work)
         res = agent.run(self.cfg, self.repo, PLAN_PROMPT, name=f"foundry-{self.name}",
                         log=self.logs / f"plan-{int(time.time())}.jsonl", label="planning",
                         timeout_min=self.cfg["run"]["task_timeout"],
@@ -382,6 +474,86 @@ class Loop:
             lines.append(f"- Follow-ups noticed: {followups}\n")
         j = self.repo / "JOURNAL.md"
         j.write_text((j.read_text() if j.exists() else "# Journal\n") + "".join(lines))
+
+
+class Suite:
+    """One loop over several repos: round-robin between those with work that can start, so every
+    product moves; a task whose Needs (here or in another repo) aren't Done waits its turn."""
+
+    def __init__(self, cfg, repos: list[Path], once=False):
+        self.cfg, self.once = cfg, once
+        self.loops = [Loop(cfg, r) for r in repos]
+        for lp in self.loops:
+            lp.peers = [o.repo for o in self.loops if o is not lp]
+
+    def run(self) -> int:
+        held = []
+        try:
+            for lp in self.loops:
+                lp._acquire_lock()
+                held.append(lp)
+            return self._run()
+        finally:
+            for lp in held:
+                lp.lock.unlink(missing_ok=True)
+
+    def _run(self) -> int:
+        caff = agent.keep_awake()
+        signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
+        active, current = [], None
+        try:
+            for lp in self.loops:
+                try:
+                    lp._preflight()
+                    active.append(lp)
+                except Fatal:
+                    raise
+                except Stop as e:
+                    print(f"[foundry] skipping {lp.name}: {e}", flush=True)
+                    lp.stopped(f"skipped by the suite run: {e}")
+            turn = 0
+            while active:
+                order = active[turn % len(active):] + active[:turn % len(active)]
+                current = next((lp for lp in order if lp.ready()), None)
+                if current is None:
+                    print("[foundry] suite stopped: nothing can start —", flush=True)
+                    for lp in active:
+                        try:
+                            lp.next_task(backlog.load(lp.repo))
+                        except Blocked as e:
+                            print(f"  {e}", flush=True)
+                            lp.stopped(str(e))
+                    break
+                turn = active.index(current) + 1
+                print(f"[foundry] suite → {current.name}", flush=True)
+                try:
+                    current._iteration()
+                except Fatal:
+                    raise
+                except Blocked:
+                    pass  # owner edits pulled in by the sync changed the picture; pick again
+                except Stop as e:
+                    print(f"[foundry] {current.name} stopped: {e}", flush=True)
+                    current.stopped(str(e))
+                    active.remove(current)
+                current = None
+                showcase.publish(self.cfg)
+                if self.once:
+                    break
+        except KeyboardInterrupt:
+            print("\n[foundry] interrupted — discarding the current attempt", flush=True)
+            if current:
+                current._abort_attempt(count=False)
+        except Stop as e:
+            print(f"[foundry] suite stopped: {e}")
+            showcase.publish(self.cfg)
+        except Exception:
+            if current:
+                current._abort_attempt(count=True)
+            raise
+        finally:
+            caff.terminate()
+        return 0
 
 
 def _section(md: str, name: str) -> str:

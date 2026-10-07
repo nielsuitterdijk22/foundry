@@ -10,7 +10,9 @@ No paid APIs at runtime.
 ```
 foundry scaffold <name>   interview → private GitHub repo with mission, stories, backlog, ./check, CI
 foundry adopt <repo>      the same, for an existing repo
+foundry cto <suite> <repo>…  one interview for a suite of products; adopts or creates each repo
 foundry run <repo>        work the backlog unattended: tests first, ./check green, merge, push
+foundry run --suite <suite>  the same, one loop across the suite's repos
 foundry report <repo>     REPORT.md for your daily check-in
 foundry purge <name>      forget a paused scaffold/adopt session and start over
 foundry serve …           start / stop / restart / status the model server
@@ -109,6 +111,55 @@ todo notes. If there's no `./check`, the model drafts one from the Makefile and 
 is red on main, the first task becomes making it green. Your existing CI is left alone; foundry
 adds `.github/workflows/foundry-check.yml`.
 
+### A suite of products: `foundry cto`
+
+`foundry cto <suite> <repo> <repo> ...` sets up a named suite from any set of repos, such as
+`foundry cto acme Quill Tempo Forge Atlas Ledger`. Each repo can be in one of three states:
+
+- **Already local:** it gets adopted.
+- **Only on GitHub:** it gets cloned, then adopted. A name GitHub redirects after a rename is refused.
+- **Doesn't exist yet:** it gets created as a new private repo, like `foundry scaffold`.
+
+A CTO interviews you once for the whole suite. Accepting its proposal is the only thing
+it asks of you; after that, everything runs unattended (pass `--review` to approve each document). It reads every repo plus any answers from earlier
+single-repo interviews, and it proposes technical defaults for you to confirm rather than asking
+open technical questions. The accepted result is `SUITE.md`: vision, customers, each product's
+role, priorities and the shared platform decisions (SSO, tenancy, billing, hosting). Then,
+product by product, it drafts and accepts a mission from `SUITE.md`, then features, stories, a
+stack and a backlog, and adopts or creates the repo. A product it can't touch safely (uncommitted
+work, wrong branch, a failed push) is skipped, listed under "Needs you" in the showcase, and
+retried the next time you run `foundry cto <suite>`. When setup is done it starts
+`foundry run --suite` by itself (`--no-run` stops after setup). A task may depend on another product's task
+(`- Needs: Quill/T-004`).
+
+The suite is kept in `~/.foundry/suites/<suite>.json`. `foundry cto <suite>` resumes a paused
+setup. `foundry cto <suite> <more repos>` adds products later: the CTO asks about the newcomers,
+proposes an updated `SUITE.md` and commits it to the products already set up. A product with a
+run in progress or a dirty tree is skipped and retried next time. `foundry purge suite <suite>`
+forgets the suite and leaves the repos alone.
+
+`foundry run --suite <suite>` works all the backlogs in one loop. It takes turns between repos
+that have a task ready to start, so every product moves. A task waits until everything in its
+`Needs` is Done. Planners see the other products' backlogs. A repo that can't start (dirty,
+wrong branch) is skipped with a message, and the rest carry on.
+
+## The showcase: checking in
+
+You don't need to watch the loops. After every iteration foundry regenerates the README of a
+private GitHub repo, `<owner>/foundry-showcase` (created on first use; name it in `[showcase]`).
+It also writes a local copy to `~/.foundry/showcase/README.md`. It shows:
+
+- **Needs you:** repos that stopped or were skipped and why, parked tasks, and questions agents
+  raised in the last week.
+- **Products:** done / todo / parked per repo, the CI badge, the last merge, and what it's doing now.
+- **Latest work:** each merge with its commit link, what changed and its demo. Every task ends with
+  the agent writing `.foundry/demo.sh`, which shows the change working from the outside (run the
+  CLI, start the server and curl the new endpoint). Foundry runs it in the sandbox after `./check`
+  passes, so the output on the page is real. A failing demo is marked, but it doesn't fail the task.
+
+Publishing never stops a loop. If GitHub is unreachable it warns, and the local copy is still
+updated.
+
 ## Things to know (measured on an M5 Pro, 48 GB)
 
 - **Speed.** Qwen3.8-27B 4-bit processes prompts at ~400–470 tok/s and generates ~15–17 tok/s.
@@ -144,6 +195,7 @@ Qwen 3.x models work. If you upgrade mlx-lm, rerun `serve status`.
 
 | File | Owner | Purpose |
 |---|---|---|
+| `SUITE.md` | you | suite repos only: the product family and its shared decisions; read-only |
 | `MISSION.md`, `FEATURES.md`, `USER_STORIES.md` | you | what to build; read-only for agents |
 | `FEEDBACK.md` | you | check-in notes; agents read it first |
 | `BACKLOG.md` | loop (you may edit) | ordered tasks with acceptance checks; Todo / Parked / Done |

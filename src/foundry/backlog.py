@@ -8,6 +8,7 @@ Format:
     - Story: US-002
     - Accept: how to verify (a test or command)
     - Tests may change: no
+    - Needs: T-002, Quill/T-004      (optional: tasks that must be Done first)
     Free text.
     ## Parked
     ## Done
@@ -114,6 +115,10 @@ def from_items(items: list[dict], start: int = 1) -> list[Task]:
         body = (f"- Story: {it.get('story', '')}\n"
                 f"- Accept: {it.get('accept', '')}\n"
                 f"- Tests may change: {'yes' if it.get('tests_may_change') else 'no'}\n")
+        needs = it.get("needs") or []
+        needs = [needs] if isinstance(needs, str) else needs
+        if [n for n in needs if n.strip()]:
+            body += f"- Needs: {', '.join(n.strip() for n in needs if n.strip())}\n"
         if it.get("details"):
             body += "\n" + it["details"].strip() + "\n"
         tasks.append(Task(f"T-{i:03d}", it["title"].strip(), body))

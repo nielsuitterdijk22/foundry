@@ -90,4 +90,30 @@ def extract_json(text: str):
     start = min((i for i in (text.find("{"), text.find("[")) if i >= 0), default=-1)
     if start < 0:
         raise ValueError(f"no JSON in model output:\n{text[:500]}")
-    return json.JSONDecoder().raw_decode(text[start:])[0]
+    try:
+        return json.JSONDecoder().raw_decode(text[start:])[0]
+    except json.JSONDecodeError:
+        # Local models regularly drop the last closing brace(s) of a long nested object.
+        fixed = close_brackets(text[start:].rstrip())
+        if fixed is None:
+            raise
+        return json.JSONDecoder().raw_decode(fixed)[0]
+
+
+def close_brackets(text: str) -> str | None:
+    """Append the closers a JSON text is missing at its end, or None if that can't be the
+    problem (a string left open, or brackets that don't pair up)."""
+    stack, in_str, esc = [], False, False
+    for ch in text:
+        if in_str:
+            esc, in_str = (False, in_str) if esc else (ch == "\\", ch != '"')
+        elif ch == '"':
+            in_str = True
+        elif ch in "{[":
+            stack.append("}" if ch == "{" else "]")
+        elif ch in "}]":
+            if not stack or stack.pop() != ch:
+                return None
+    if in_str or not stack:
+        return None
+    return text + "".join(reversed(stack))
