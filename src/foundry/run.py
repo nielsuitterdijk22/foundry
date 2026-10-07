@@ -124,7 +124,19 @@ class Loop:
             raise Stop("model server is not running — `foundry serve start`")
         sandbox.ensure_proxy(self.cfg)
         st = self._state()
-        if st.get("in_progress"):
+        if st.get("merged"):
+            print(f"[foundry] finishing bookkeeping for {st['task']} (merged {st['merged']} before a crash)")
+            git.git(self.repo, "checkout", "-f", self.main)
+            git.git(self.repo, "branch", "-D", f"foundry/{st['task']}", check=False)
+            bl = backlog.load(self.repo)
+            if any(t.id == st["task"] for t in bl.todo):
+                bl.move(st["task"], "Done", f"Done: {_today()} in {st['merged']} (attempt {st['attempt']})")
+                backlog.save(self.repo, bl)
+                self._journal(f"{st['task']} — merged {st['merged']} (bookkeeping recovered after crash)",
+                              None, "", [], "", "")
+                self._commit_main(f"foundry: {st['task']} done", ["BACKLOG.md", "JOURNAL.md"])
+            self._save({})
+        elif st.get("in_progress"):
             # Crash recovery: the attempt already counts; throw away its partial work.
             print(f"[foundry] recovering from interrupted attempt on {st['task']}")
             self._abort_attempt(count=True)
@@ -201,6 +213,7 @@ class Loop:
     # ---------- iterations ----------
 
     def _iteration(self):
+        serve.ensure(self.cfg)
         self._sync()
         bl = backlog.load(self.repo)
         if not bl.todo:
@@ -233,8 +246,19 @@ class Loop:
                         log=self.logs / f"{tag}.jsonl",
                         timeout_min=self.cfg["run"]["task_timeout"],
                         token_budget=self.cfg["run"]["task_token_budget"])
+        if not serve.healthy(self.cfg):
+            # Infrastructure failure, not the model's: don't count the attempt.
+            self.server_crashes = getattr(self, "server_crashes", 0) + 1
+            print(f"[foundry] model server died during {tag}; retrying without counting the attempt", flush=True)
+            self._metric(outcome="server_crash", task=task.id, attempt=n, seconds=round(res.seconds))
+            self._abort_attempt(count=False)
+            if self.server_crashes >= 3:
+                raise Stop("model server crashed 3 times — see ~/.foundry/server.log")
+            return
+        self.server_crashes = 0
         summary = (work / "summary.md").read_text() if (work / "summary.md").exists() else ""
-        git.git(self.repo, "checkout", self.main, "--", *[p for p in LOOP_OWNED if (self.repo / p).exists()])
+        tracked = git.git(self.repo, "ls-tree", "--name-only", self.main).splitlines()
+        git.git(self.repo, "checkout", self.main, "--", *[p for p in LOOP_OWNED if p in tracked])
 
         verdict = guards.inspect(self.repo, self.main, self.cfg["run"]["protected"], task.tests_may_change)
         changed = git.changed_files(self.repo, self.main)
@@ -277,6 +301,7 @@ class Loop:
         git.git(self.repo, "checkout", self.main)
         git.git(self.repo, "merge", "--no-ff", st["branch"], "-m", f"Merge {task.id}: {task.title}")
         sha = git.git(self.repo, "rev-parse", "--short", "HEAD")
+        self._save({"task": task.id, "merged": sha, "attempt": n})  # crash after this: bookkeeping only
         git.git(self.repo, "branch", "-D", st["branch"])
         bl = backlog.load(self.repo)
         bl.move(task.id, "Done", f"Done: {_today()} in {sha} (attempt {n})")

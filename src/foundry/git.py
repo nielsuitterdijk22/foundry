@@ -61,11 +61,15 @@ def _ssh_env(cfg: dict, slug_: str) -> dict:
 
 
 def remote_op(cfg: dict, repo: Path, *args: str) -> str:
-    """fetch/push against GitHub over SSH with the deploy key (origin config untouched)."""
-    s = slug(repo)
-    url = f"git@github.com:{s}.git"
+    """fetch/push. GitHub remotes go over SSH with the deploy key (origin config untouched);
+    any other remote (e.g. a local bare repo) is used as-is."""
+    url = git(repo, "remote", "get-url", "origin")
+    env = None
+    if "github.com" in url:
+        s = slug(repo)
+        url, env = f"git@github.com:{s}.git", _ssh_env(cfg, s)
     r = subprocess.run(["git", *SAFE, args[0], url, *args[1:]], cwd=repo, text=True,
-                       capture_output=True, env=_ssh_env(cfg, s))
+                       capture_output=True, env=env)
     if r.returncode != 0:
         raise RuntimeError(f"git {args[0]} failed:\n{r.stderr.strip()}")
     return r.stdout.strip()

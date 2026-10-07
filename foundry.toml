@@ -9,7 +9,8 @@ state = "~/.foundry"               # logs, pid files, run state, deploy keys, me
 # Any MLX model on Hugging Face (or a local path). Swap models here, then `foundry serve restart`.
 id = "lmstudio-community/Qwen3.8-27B-MLX-4bit"
 context = 131072                   # tokens OpenCode may use (model supports 262144)
-max_output = 32768                 # max tokens per response
+max_output = 8192                  # max tokens per response; caps runaway generations, which
+                                   # can also crash mlx-lm (Metal buffer-count limit, mlx-lm#1662)
 thinking = true                    # Qwen thinking mode (slower, better at agentic work)
 
 # Sampling. Qwen3.8 recommends these for thinking mode; for thinking=false use

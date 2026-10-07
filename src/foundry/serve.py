@@ -101,6 +101,16 @@ def stop(cfg) -> None:
     print("server stopped")
 
 
+def ensure(cfg) -> bool:
+    """Make sure the server is healthy, restarting it if it died. Returns True if restarted."""
+    if healthy(cfg):
+        return False
+    print("[foundry] model server unhealthy — restarting", flush=True)
+    stop(cfg)
+    start(cfg)
+    return True
+
+
 TOOL = {
     "type": "function",
     "function": {
