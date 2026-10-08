@@ -513,6 +513,18 @@ class GitHubFlaky(unittest.TestCase):
         self.assertTrue(key.exists() and Path(f"{key}.pub").exists())
 
 
+class Status(unittest.TestCase):
+    def test_terminal_view_keeps_every_entry(self):
+        md = ("# Foundry showcase\nUpdated.\n\n## Latest work\n\n### ⏸ Quill · T-001 parked · 1 h ago\ntimeout\n"
+              "\n### Tempo · T-001: Client\n3 h ago · `abc` · attempt 1\n\n- did things\n- more\n"
+              "\n### Forge · T-000: Check\n6 h ago · `def` · attempt 1\n\n- fixed\n")
+        out = showcase._two_lines_per_entry(md)
+        self.assertIn("### Tempo · T-001: Client\n3 h ago", out)
+        self.assertIn("### Forge · T-000: Check\n6 h ago", out)
+        self.assertNotIn("did things", out)
+        self.assertIn("timeout", out)
+
+
 class Interview(unittest.TestCase):
     def test_classify_replies(self):
         self.assertEqual(scaffold._classify("Who pays?"), ("question", "Who pays?"))

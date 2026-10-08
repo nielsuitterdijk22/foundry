@@ -7,6 +7,7 @@ status, and the latest merged work with the real output of its demo. A local cop
 """
 
 import json
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -19,12 +20,11 @@ DEMO_CHARS = 2500  # demo output shown per entry (the tail, where results usuall
 
 def status(cfg: dict, args: list[str]) -> int:
     """foundry status: the showcase in the terminal (without demo output), plus what runs right now."""
-    import re
     running = [_live(cfg, p) for p in config.state_dir(cfg, "locks").glob("*.lock")]
     running = [r for r in running if r]
     md = render(cfg, datetime.now())
     md = re.sub(r"\n<details.*?</details>\n", "\n", md, flags=re.S)       # demo output: see the page
-    md = re.sub(r"(\n### [^\n]*\n[^\n]*\n)\n(?:(?!\n### )[\s\S])*?(?=\n### |\Z)", r"\1", md)  # one line per entry
+    md = _two_lines_per_entry(md)
     md = re.sub(r"\[!\[check\]\([^)]*\)\]\([^)]*\)", "", md)           # badges don't render here
     md = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", md)                    # links: keep the text
     print(md.split("\n", 2)[2] if md.startswith("# ") else md)
@@ -37,6 +37,20 @@ def status(cfg: dict, args: list[str]) -> int:
         pass
     print(f"\nFull page with demos: {url or '(not published yet)'} · local: {config.state_dir(cfg, 'showcase') / 'README.md'}")
     return 0
+
+
+def _two_lines_per_entry(md: str) -> str:
+    """In "Latest work", keep each entry's heading and the line under it (when, commit, attempt)."""
+    out, keep = [], 0
+    for line in md.split("\n"):
+        if line.startswith("## "):
+            keep = -1  # sections other than entries: keep everything
+        if line.startswith("### "):
+            keep = 2
+        if keep == -1 or keep > 0 or not line.strip():
+            out.append(line)
+            keep = keep - 1 if keep > 0 else keep
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(out))
 
 
 def _live(cfg, lock: Path) -> str:
