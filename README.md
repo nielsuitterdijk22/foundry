@@ -167,6 +167,18 @@ to act. If it still hasn't, the thought shows as 🔴 overdue under "Needs you".
 **Immediate thoughts:** an immediate task goes to the top of its backlog, and that product runs
 next. It waits for the task that's running to finish; it doesn't interrupt it.
 
+The same inbox carries the CTO's own jobs, so engineering trouble doesn't reach you:
+
+- **A stuck task:** parked after 3 attempts, or already after the first attempt that hits the time
+  or token cap. The CTO usually splits it into smaller tasks that replace it, and anything that
+  needed the old task now needs the last new one. It can also rework the task with concrete
+  guidance, or drop it.
+- **An agent's question:** the CTO answers it, writing the decision into the `FEEDBACK.md` of the
+  products whose agents need it and adding tasks where work follows.
+- **Escalation:** only questions about customers, pricing, priorities or legal matters come to you,
+  plus a task the CTO has already reworked twice. Answer with `foundry tell`; the CTO links your
+  answer to its question.
+
 Decisions show up in the showcase's "CTO inbox". An issue gets a reply comment and is closed once
 it's handled. `foundry tell <suite>` on its own lists the inbox.
 
@@ -179,8 +191,9 @@ You don't need to watch the loops. After every iteration foundry regenerates the
 private GitHub repo, `<owner>/foundry-showcase` (created on first use; name it in `[showcase]`).
 It also writes a local copy to `~/.foundry/showcase/README.md`. It shows:
 
-- **Needs you:** repos that stopped or were skipped and why, parked tasks, and questions agents
-  raised in the last week.
+- **Needs you:** only what the CTO can't decide for you: its escalated questions (customers,
+  pricing, priorities, legal; answer with `foundry tell`), repos that stopped and why, and your own
+  thoughts past their deadline. Stuck tasks and agents' questions are the CTO's job (see below).
 - **Products:** done / todo / parked per repo, the CI badge, the last merge, and what it's doing now.
 - **Latest work:** each merge with its commit link, what changed and its demo. Every task ends with
   the agent writing `.foundry/demo.sh`, which shows the change working from the outside (run the

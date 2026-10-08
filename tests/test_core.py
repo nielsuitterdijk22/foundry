@@ -233,8 +233,9 @@ class Showcase(unittest.TestCase):
             (metrics / "gone.jsonl").write_text(json.dumps({"ts": "2026-10-01T10:00:00", "outcome": "merged"}) + "\n")
             md = showcase.render(cfg, datetime(2026, 10, 7, 12, 0))
         self.assertIn("**Quill** stopped 30 min ago: local main and GitHub main have diverged", md)
-        self.assertIn("**Quill** parked T-002: Hard one", md)
-        self.assertIn("**Quill** T-001 asks: Should archived repos show?", md)
+        needs = md.split("## Needs you")[1].split("\n## ")[0]
+        self.assertNotIn("T-002", needs)  # parked tasks and agent questions are the CTO's jobs now
+        self.assertNotIn("archived", needs)
         self.assertIn("| [Quill](https://github.com/me/Quill) [![check](https://github.com/me/Quill/actions/workflows/"
                       "foundry-check.yml/badge.svg)]", md)
         self.assertIn("| 0 | 1 | 1 | 2 h ago | ⏸ stopped |", md)
@@ -346,6 +347,77 @@ class Inbox(unittest.TestCase):
         (argv, kw), = started
         self.assertEqual(argv[1:], ["-m", "foundry", "triage", "acme"])
         self.assertTrue(kw["start_new_session"])
+
+    def test_cto_handles_stuck_tasks_and_questions(self):
+        quill, tempo = self.suite.loops
+        bl = backlog.Backlog()
+        bl.sections["Todo"] = backlog.from_items([{"title": "Later", "needs": ["T-001"]}])
+        bl.sections["Todo"][0].id = "T-002"
+        bl.sections["Parked"] = [backlog.Task("T-001", "Quota enforcement", "- Parked: 2026-10-08 after 3 attempts — timeout\n")]
+        backlog.save(quill.repo, bl)
+        bl = backlog.Backlog()
+        bl.sections["Todo"] = backlog.from_items([{"title": "Use quotas", "needs": ["Quill/T-001"]}])
+        backlog.save(tempo.repo, bl)
+        metrics = self.root / ".state" / "metrics"
+        metrics.mkdir(parents=True, exist_ok=True)
+        (metrics / "tempo.jsonl").write_text(json.dumps({"ts": "2026-10-08T01:00:00", "outcome": "merged", "task": "T-009",
+                                                         "title": "Client", "questions": "Header name for tenant?"}) + "\n")
+        replies = {
+            "The stuck task:": {"decision": "act", "why": "too big", "actions": [
+                {"kind": "task", "product": "Quill", "title": "Quota model", "position": "top"},
+                {"kind": "task", "product": "Quill", "title": "Enforce quotas", "position": "top", "needs": ["T-003"]}]},
+            "The agent's question:": {"decision": "act", "why": "contract", "actions": [
+                {"kind": "feedback", "product": "Tempo", "text": "Use the X-Tenant-Id header."}]},
+        }
+
+        def model(cfg, system, messages, **kw):
+            return next(r for k, r in replies.items() if k in messages[0]["content"]), ""
+        from unittest import mock
+        with mock.patch.object(scaffold, "model_json", model):
+            self.suite.inbox.process()
+        qbl = backlog.load(quill.repo)
+        self.assertEqual([t.title for t in qbl.todo], ["Enforce quotas", "Quota model", "Later"])
+        old = qbl.sections["Parked"][0]
+        self.assertIn("superseded by T-003, T-004", old.body)
+        self.assertEqual(qbl.todo[2].field("Needs"), "T-004")                       # rewired here...
+        self.assertEqual(backlog.load(tempo.repo).todo[0].field("Needs"), "Quill/T-004")  # ...and across products
+        self.assertIn("## 20", (tempo.repo / "FEEDBACK.md").read_text())
+        self.assertIn("decided by the CTO\nUse the X-Tenant-Id header.", (tempo.repo / "FEEDBACK.md").read_text())
+        items = inbox.load(self.cfg, "acme")["items"]
+        self.assertEqual(sorted((i["kind"], i["status"]) for i in items.values()), [("question", "done"), ("stuck", "done")])
+        with mock.patch.object(scaffold, "model_json", lambda *a, **k: self.fail("handled jobs come back")):
+            self.suite.inbox.process()
+        md = showcase.render(self.cfg, __import__("datetime").datetime.now())
+        self.assertNotIn("CTO asks", md)
+
+    def test_rework_then_escalate_after_two_fixes(self):
+        from unittest import mock
+        quill = self.suite.loops[0]
+        bl = backlog.Backlog()
+        bl.sections["Parked"] = [backlog.Task("T-001", "Hard", "- Parked: x\n")]
+        backlog.save(quill.repo, bl)
+        rework = {"decision": "act", "why": "misread", "actions": [
+            {"kind": "rework", "product": "Quill", "task": "T-001", "guidance": "Start with the schema."}]}
+        with mock.patch.object(scaffold, "model_json", lambda *a, **k: (rework, "")):
+            self.suite.inbox.process()
+        bl = backlog.load(quill.repo)
+        self.assertEqual(bl.todo[0].id, "T-001")
+        self.assertIn("- CTO (", bl.todo[0].body)
+        for _ in range(2):  # fails again → second rework; fails again → the owner is asked
+            bl = backlog.load(quill.repo)
+            bl.move("T-001", "Parked")
+            backlog.save(quill.repo, bl)
+            with mock.patch.object(scaffold, "model_json", lambda *a, **k: (rework, "")):
+                self.suite.inbox.process()
+        items = inbox.load(self.cfg, "acme")["items"]
+        self.assertEqual(items["stuck:Quill:T-001:2"]["status"], "escalated")
+        md = showcase.render(self.cfg, __import__("datetime").datetime.now())
+        self.assertIn("- **CTO asks** (Quill): Quill T-001 (Hard) still fails after two fixes", md)
+        inbox.add(self.cfg, "acme", "drop it")
+        resolve = {"decision": "act", "why": "owner said so", "actions": [{"kind": "resolve", "id": "stuck:Quill:T-001:2"}]}
+        with mock.patch.object(scaffold, "model_json", lambda *a, **k: (resolve, "")):
+            self.suite.inbox.process()
+        self.assertEqual(inbox.load(self.cfg, "acme")["items"]["stuck:Quill:T-001:2"]["status"], "done")
 
     def test_owner_notes_newest_first(self):
         md = inbox._add_owner_note("# Suite\n", "one")

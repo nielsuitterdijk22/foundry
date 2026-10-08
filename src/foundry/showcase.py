@@ -7,7 +7,7 @@ status, and the latest merged work with the real output of its demo. A local cop
 """
 
 import json
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 
 from . import backlog, config, git
@@ -118,7 +118,6 @@ def render(cfg: dict, now: datetime) -> str:
     events = _events(cfg)
     info = {name: _repo_info(cfg, name) for name in events}
     needs, rows, latest = [], [], []
-    week = now - timedelta(days=7)
 
     needs += _overdue_thoughts(cfg, now)
     for name, evs in events.items():
@@ -129,12 +128,7 @@ def render(cfg: dict, now: datetime) -> str:
         bl = backlog.load(repo) if repo else backlog.Backlog()
         if last.get("outcome") == "stopped":
             needs.append(f"- **{display}** stopped {_when(last['ts'], now)}: {last.get('reason', '')}")
-        for t in bl.sections["Parked"]:
-            note = next((ln[2:] for ln in t.body.splitlines() if ln.startswith("- Parked:")), "")
-            needs.append(f"- **{display}** parked {t.id}: {t.title} — {note.removeprefix('Parked: ')[:300]}")
-        for e in evs:
-            if e.get("outcome") == "merged" and datetime.fromisoformat(e["ts"]) >= week and _real(e.get("questions")):
-                needs.append(f"- **{display}** {e['task']} asks: {_real(e['questions'])[:500]}")
+        # Parked tasks and agents' questions are the CTO's jobs (see inbox); only its escalations land here.
         merged = [e for e in evs if e.get("outcome") == "merged"]
         state = ("⏸ stopped" if last.get("outcome") == "stopped" else _now(cfg, name, bl)) if repo else "not set up"
         rows.append(f"| {f'[{display}](https://github.com/{slug})' if slug else display} {_badge(repo, slug) if repo else ''} "
@@ -158,8 +152,9 @@ def render(cfg: dict, now: datetime) -> str:
         if e["outcome"] == "parked":
             out.append(f"\n### ⏸ {display} · {e['task']} parked · {_when(e['ts'], now)}\n{e.get('reason', '')}\n")
             continue
-        sha = f"[`{e['sha']}`](https://github.com/{slug}/commit/{e['sha']})" if slug else f"`{e['sha']}`"
-        out.append(f"\n### {display} · {e['task']}: {e['title']}\n"
+        sha = e.get("sha", "")
+        sha = f"[`{sha}`](https://github.com/{slug}/commit/{sha})" if slug and sha else f"`{sha or '?'}`"
+        out.append(f"\n### {display} · {e.get('task', '?')}: {e.get('title', '')}\n"
                    f"{_when(e['ts'], now)} · {sha} · attempt {e.get('attempt', '?')} · {e.get('seconds', 0) // 60} min\n\n")
         if _real(e.get("done")):
             out.append(_real(e["done"]) + "\n")
@@ -179,10 +174,26 @@ def slug(cfg) -> str:
 
 
 def _overdue_thoughts(cfg, now) -> list[str]:
+    """What the CTO brings to the owner: its escalated questions, and owner thoughts past their deadline."""
     from . import inbox
-    return [f"- **CTO** hasn't acted on your {it['prio']} thought (due {inbox.deadline(it):%a %d %b %H:%M}): "
-            f"{it['text'][:200]}" + (f" — {it['revisit_when']}" if it.get("revisit_when") else "")
-            for suite in inbox.suites(cfg) for it in inbox.load(cfg, suite)["items"].values() if inbox.overdue(it, now)]
+    out = []
+    for suite in inbox.suites(cfg):
+        for it in inbox.load(cfg, suite)["items"].values():
+            if it["status"] == "escalated":
+                about = f" ({it['product']})" if it.get("product") else ""
+                out.append(f"- **CTO asks**{about}: {it.get('ask_owner', '')} — answer with `foundry tell {suite} \"...\"`")
+            elif inbox.overdue(it, now) and it.get("kind", "thought") == "thought":
+                out.append(f"- **CTO** hasn't acted on your {it['prio']} thought (due {inbox.deadline(it):%a %d %b %H:%M}): "
+                           f"{it['text'][:200]}" + (f" — {it['revisit_when']}" if it.get("revisit_when") else ""))
+    return out
+
+
+def _label(it: dict) -> str:
+    return {"stuck": "🧩 stuck task", "question": "❓ agent question"}.get(it.get("kind", "thought"), f"**{it['prio']}**")
+
+
+def _first(it: dict) -> str:
+    return it["text"].strip().splitlines()[0][:200]
 
 
 def _inbox_section(cfg) -> list[str]:
@@ -197,10 +208,10 @@ def _inbox_section(cfg) -> list[str]:
             wait = (f"deferred: revisit when {it.get('revisit_when', '')}" if it["status"] == "deferred"
                     else "waiting for the CTO")
             mark = "🔴 overdue" if inbox.overdue(it, datetime.now()) else f"by {inbox.deadline(it):%a %d %b %H:%M}"
-            out.append(f"- ⏳ **{it['prio']}** ({mark}) {it['text'][:200]} — _{wait}_\n")
+            out.append(f"- ⏳ {_label(it)} ({mark}) {_first(it)} — _{wait}_\n")
         for it in [i for i in items if i["status"] in ("done", "dropped")][:8]:
             did = "; ".join(it.get("did") or [])
-            out.append(f"- {'✅' if it['status'] == 'done' else '➖'} {it['text'][:200]} — {it.get('why', '')}"
+            out.append(f"- {'✅' if it['status'] == 'done' else '➖'} {_label(it)} {_first(it)} — {it.get('why', '')}"
                        + (f" → {did}" if did else "") + "\n")
     if out:
         out.append("\nTell the CTO something: `foundry tell <suite> [--now|--high|--med|--low] \"...\"` "
