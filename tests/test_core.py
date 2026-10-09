@@ -112,6 +112,20 @@ class GitRepo(unittest.TestCase):
         lp._reset_to_main("foundry/T-001")        # ...a failure that isn't kept drops it
         self.assertFalse(lp._has_wip("foundry/T-001"))
 
+    def test_interrupted_attempt_keeps_its_work(self):
+        lp = self.loop()
+        lp._start_branch("foundry/T-001")
+        lp._save({"task": "T-001", "attempt": 1, "notes": [], "branch": "foundry/T-001", "in_progress": True})
+        (self.repo / "half.go").write_text("package a\n")
+        from unittest import mock
+        env = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+        with mock.patch.object(run.sandbox, "kill", lambda name: None), mock.patch.dict("os.environ", env):
+            lp._abort_attempt(count=False)
+        self.assertEqual(git.git(self.repo, "rev-parse", "--abbrev-ref", "HEAD"), "main")
+        self.assertFalse((self.repo / "half.go").exists())
+        self.assertTrue(lp._has_wip("foundry/T-001"))
+        self.assertEqual(lp._state()["attempt"], 0)  # not counted
+
     def test_remote_op_gives_up_instead_of_hanging(self):
         from unittest import mock
         sh(self.repo, "git", "remote", "add", "origin", str(self.repo / "nowhere.git"))

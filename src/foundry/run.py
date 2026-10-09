@@ -269,7 +269,16 @@ class Loop:
             return
         sandbox.kill(f"foundry-{self.name}")
         sandbox.kill(f"foundry-{self.name}-check")
-        branch = st.get("branch")  # kept work from earlier attempts survives an interruption
+        branch = st.get("branch")
+        tracked = git.git(self.repo, "ls-tree", "--name-only", self.main).splitlines()
+        if branch and git.git(self.repo, "rev-parse", "--abbrev-ref", "HEAD") == branch:
+            # Keep what the interrupted attempt wrote; the next attempt continues it (and is checked as usual).
+            if owned := [p for p in LOOP_OWNED if p in tracked]:  # no paths would switch branches
+                git.git(self.repo, "checkout", self.main, "--", *owned)
+            if git.dirty(self.repo):
+                git.git(self.repo, "add", "-A")
+                git.git(self.repo, "commit", "-qm", f"WIP {st['task']}: attempt {st['attempt']} interrupted")
+                print(f"[foundry] partial work of {st['task']} kept on {branch}", flush=True)
         self._reset_to_main(None if branch and self._has_wip(branch) else branch)
         st["in_progress"] = False
         if count:
@@ -344,7 +353,8 @@ class Loop:
         self.server_crashes = 0
         summary = (work / "summary.md").read_text() if (work / "summary.md").exists() else ""
         tracked = git.git(self.repo, "ls-tree", "--name-only", self.main).splitlines()
-        git.git(self.repo, "checkout", self.main, "--", *[p for p in LOOP_OWNED if p in tracked])
+        if owned := [p for p in LOOP_OWNED if p in tracked]:  # no paths would switch branches
+            git.git(self.repo, "checkout", self.main, "--", *owned)
 
         verdict = guards.inspect(self.repo, self.main, self.cfg["run"]["protected"], task.tests_may_change)
         changed = git.changed_files(self.repo, self.main)
