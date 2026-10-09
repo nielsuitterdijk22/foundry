@@ -112,6 +112,19 @@ class GitRepo(unittest.TestCase):
         lp._reset_to_main("foundry/T-001")        # ...a failure that isn't kept drops it
         self.assertFalse(lp._has_wip("foundry/T-001"))
 
+    def test_remote_op_gives_up_instead_of_hanging(self):
+        from unittest import mock
+        sh(self.repo, "git", "remote", "add", "origin", str(self.repo / "nowhere.git"))
+        real = subprocess.run
+
+        def hang(argv, **k):  # only the push stalls
+            if "push" in argv:
+                raise subprocess.TimeoutExpired(argv, k.get("timeout"))
+            return real(argv, **k)
+        with mock.patch.object(git.subprocess, "run", hang), self.assertRaises(RuntimeError) as e:
+            git.remote_op({}, self.repo, "push", "main:main", timeout=5)
+        self.assertIn("no answer from GitHub within 5s", str(e.exception))
+
     def test_deleting_protected_file_rejected(self):
         (self.repo / "MISSION.md").unlink()
         self.assertFalse(self.inspect().ok)

@@ -122,7 +122,7 @@ def ensure(cfg) -> bool:
     if healthy(cfg):
         return False
     for attempt in range(1, 4):  # a crash (e.g. GPU out of memory) usually recovers on a fresh start
-        print(f"[foundry] model server unhealthy — restarting (try {attempt}/3)", flush=True)
+        print(f"[foundry] model server not answering — (re)starting it (try {attempt}/3)", flush=True)
         try:
             stop(cfg)
             start(cfg)

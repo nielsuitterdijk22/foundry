@@ -69,4 +69,8 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:  # Ctrl-C anywhere: the loops already cleaned up after themselves
+        print("\n[foundry] stopped", file=sys.stderr)
+        sys.exit(130)

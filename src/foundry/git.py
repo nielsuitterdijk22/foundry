@@ -112,19 +112,23 @@ def _ssh_env(cfg: dict, slug_: str) -> dict:
     key = key_path(cfg, slug_)
     return {**os.environ, "GIT_SSH_COMMAND":
             f"ssh -i {key} -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes "
-            f"-o UserKnownHostsFile={_known_hosts(cfg)}"}
+            f"-o UserKnownHostsFile={_known_hosts(cfg)} "
+            "-o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=4"}  # a stall fails in ~1 min
 
 
-def remote_op(cfg: dict, repo: Path, *args: str) -> str:
+def remote_op(cfg: dict, repo: Path, *args: str, timeout: float = 300) -> str:
     """fetch/push. GitHub remotes go over SSH with the deploy key (origin config untouched);
-    any other remote (e.g. a local bare repo) is used as-is."""
+    any other remote (e.g. a local bare repo) is used as-is. Never waits longer than timeout."""
     url = git(repo, "remote", "get-url", "origin")
     env = None
     if "github.com" in url:
         s = slug(repo)
         url, env = f"git@github.com:{s}.git", _ssh_env(cfg, s)
-    r = subprocess.run(["git", *SAFE, args[0], url, *args[1:]], cwd=repo, text=True,
-                       capture_output=True, env=env)
+    try:
+        r = subprocess.run(["git", *SAFE, args[0], url, *args[1:]], cwd=repo, text=True,
+                           capture_output=True, env=env, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"git {args[0]} failed:\nno answer from GitHub within {timeout:.0f}s") from None
     if r.returncode != 0:
         raise RuntimeError(f"git {args[0]} failed:\n{r.stderr.strip()}")
     return r.stdout.strip()

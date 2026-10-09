@@ -175,8 +175,10 @@ class Loop:
         self.lock.write_text(str(os.getpid()))
 
     def _preflight(self):
-        if not serve.healthy(self.cfg):
-            raise Fatal("model server is not running — `foundry serve start`")
+        try:
+            serve.ensure(self.cfg)  # unattended: start the model server if it isn't running
+        except RuntimeError as e:
+            raise Fatal(str(e)) from None
         sandbox.ensure_proxy(self.cfg)
         st = self._state()
         if st.get("merged"):

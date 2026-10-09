@@ -252,4 +252,4 @@ def _push(cfg, d: Path):
         return
     git.git(d, "-c", "user.name=foundry", "-c", "user.email=foundry@localhost",
             "commit", "-qm", "showcase update")
-    git.remote_op(cfg, d, "push", "--force", "main:main")  # generated content: the latest wins
+    git.remote_op(cfg, d, "push", "--force", "main:main", timeout=60)  # generated: the latest wins
