@@ -205,8 +205,16 @@ updated.
 
 ## Things to know (measured on an M5 Pro, 48 GB)
 
-- **Speed.** Qwen3.8-27B 4-bit processes prompts at ~400–470 tok/s and generates ~15–17 tok/s.
-  A small task takes a few minutes; a gnarly one up to the 60-minute cap.
+- **Speed.** Qwen3.8-27B 4-bit processes prompts at ~400–470 tok/s and generates ~15–17 tok/s
+  on short prompts, but only 6–9 tok/s once a session's context passes ~100k tokens. Nearly all
+  of an attempt's time is the model; builds and tests take minutes at most.
+- **The 60-minute cap per attempt** keeps one confused agent from burning the night. Foundry stays
+  under it in four ways:
+  - Tasks are sized for about 30 minutes: one capability, 3–4 files, about 300 changed lines.
+  - The context is capped at 64k tokens, so OpenCode summarizes earlier. Each step stays fast,
+    and the server doesn't run out of GPU memory.
+  - An attempt that hits the cap keeps its work, and the next attempt continues from it.
+  - After a second cap hit, the CTO splits the task.
 - **Thinking mode is off by default.** OpenCode doesn't pass the model's reasoning back to it,
   so with thinking on, Qwen3.8 re-thinks every step and can spend 8K+ tokens (8+ minutes)
   before acting. Non-thinking mode works in tight write → test → fix loops. Flip `thinking`

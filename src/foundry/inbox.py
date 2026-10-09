@@ -62,7 +62,7 @@ that owns it). Drop it if no action is needed.""",
 TRIAGE_PROMPT = """You are the CTO of the {suite} software suite. {situation}
 
 Options (combine actions as needed):
-- "task": an engineering task for one product: small enough for one agent session, with an
+- "task": an engineering task for one product: """ + backlog.TASK_SIZE + """; with an
   automated acceptance check. "position": "top" only when it must come before everything queued.
 - "feedback": direction for one product's agents (a decision, a preference, a correction, a
   constraint). It goes into that product's FEEDBACK.md, which its agents read first every session.
@@ -236,8 +236,8 @@ class Inbox:
             name, bl = lp.repo.name, backlog.load(lp.repo)
             stuck = list(bl.sections["Parked"])
             ls = lp._state()
-            if ls.get("task") and not ls.get("in_progress") and any("cap hit" in n for n in ls.get("notes", [])):
-                stuck += [t for t in bl.todo if t.id == ls["task"]]  # hit a cap: likely too big; don't wait for 3
+            if ls.get("task") and not ls.get("in_progress") and sum("cap hit" in n for n in ls.get("notes", [])) >= 2:
+                stuck += [t for t in bl.todo if t.id == ls["task"]]  # out of time twice, even continuing: too big
             for t in stuck:
                 cto = _cto_lines(t)
                 if any("superseded by" in ln or "dropped" in ln for ln in cto):
@@ -403,6 +403,7 @@ class Inbox:
                     bl.move(t.id, "Parked")
                 t.body = t.body.rstrip() + f"\n- CTO ({today}): {note}\n"
                 backlog.save(home.repo, bl)
+                git.git(home.repo, "branch", "-D", f"foundry/{t.id}", check=False)  # its kept work is moot now
                 touched[home].add("BACKLOG.md")
                 did.append(f"{home.repo.name}/{t.id} {note}")
             if new:

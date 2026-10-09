@@ -21,12 +21,23 @@ def _logfile(cfg):
 
 
 def pid(cfg) -> int | None:
+    """The running server's pid, or None. A server this process started and that has died stays a
+    zombie until reaped, and still answers kill(0): reap it first. PermissionError means the pid
+    now belongs to someone else's process."""
     try:
         p = int(_pidfile(cfg).read_text())
-        os.kill(p, 0)
-        return p
-    except (FileNotFoundError, ValueError, ProcessLookupError):
+    except (FileNotFoundError, ValueError):
         return None
+    try:
+        if os.waitpid(p, os.WNOHANG)[0] == p:
+            return None
+    except ChildProcessError:
+        pass  # not our child: started by an earlier foundry process
+    try:
+        os.kill(p, 0)
+    except (ProcessLookupError, PermissionError):
+        return None
+    return p
 
 
 def healthy(cfg) -> bool:
@@ -90,13 +101,18 @@ def stop(cfg) -> None:
         print("server not running")
         _pidfile(cfg).unlink(missing_ok=True)
         return
-    os.killpg(p, signal.SIGTERM)
-    for _ in range(30):
-        if not pid(cfg):
-            break
-        time.sleep(0.5)
-    else:
-        os.killpg(p, signal.SIGKILL)
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(p, sig)
+        except (ProcessLookupError, PermissionError):
+            break  # already gone (macOS answers EPERM for a group of zombies)
+        for _ in range(30):
+            if not pid(cfg):
+                break
+            time.sleep(0.5)
+        else:
+            continue
+        break
     _pidfile(cfg).unlink(missing_ok=True)
     print("server stopped")
 
@@ -105,10 +121,16 @@ def ensure(cfg) -> bool:
     """Make sure the server is healthy, restarting it if it died. Returns True if restarted."""
     if healthy(cfg):
         return False
-    print("[foundry] model server unhealthy — restarting", flush=True)
-    stop(cfg)
-    start(cfg)
-    return True
+    for attempt in range(1, 4):  # a crash (e.g. GPU out of memory) usually recovers on a fresh start
+        print(f"[foundry] model server unhealthy — restarting (try {attempt}/3)", flush=True)
+        try:
+            stop(cfg)
+            start(cfg)
+            return True
+        except (SystemExit, OSError) as e:
+            print(f"[foundry] restart failed: {e}", flush=True)
+            time.sleep(30 * attempt)
+    raise RuntimeError(f"the model server could not be restarted — see {_logfile(cfg)}")
 
 
 TOOL = {

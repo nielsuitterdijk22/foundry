@@ -4,9 +4,10 @@ import json
 import subprocess
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
-from foundry import backlog, git, guards, inbox, llm, run, scaffold, showcase, stacks
+from foundry import backlog, git, guards, inbox, llm, run, scaffold, serve, showcase, stacks
 
 
 def sh(cwd, *args):
@@ -82,6 +83,34 @@ class GitRepo(unittest.TestCase):
         self.assertEqual(scaffold._reason(e), "git push failed: ! [rejected]        master -> master (fetch first)")
         self.assertEqual(scaffold._reason(SystemExit("Atlas has 3 uncommitted change(s).\nCommit first.")),
                          "Atlas has 3 uncommitted change(s).")
+
+    def loop(self):
+        cfg = {"paths": {"repos": self.repo.parent, "state": self.repo / ".state"}, "run": {"max_attempts": 3}}
+        (self.repo / ".gitignore").write_text(".state/\n")
+        sh(self.repo, "git", "add", ".gitignore")
+        sh(self.repo, "git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "ignore state")
+        return run.Loop(cfg, self.repo)
+
+    def test_kept_work_is_continued_and_kept_up_to_date(self):
+        lp = self.loop()
+        self.assertEqual(lp._start_branch("foundry/T-001"), "")  # nothing kept: fresh from main
+        (self.repo / "half.go").write_text("package a\n")
+        sh(self.repo, "git", "add", "half.go")
+        sh(self.repo, "git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "WIP T-001")
+        sh(self.repo, "git", "checkout", "-q", "main")
+        (self.repo / "JOURNAL.md").write_text("# Journal\n")  # main moves on meanwhile
+        sh(self.repo, "git", "add", "JOURNAL.md")
+        sh(self.repo, "git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "bookkeeping")
+        with unittest.mock.patch.dict("os.environ", {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+                                                     "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}):
+            so_far = lp._start_branch("foundry/T-001")
+        self.assertIn("half.go", so_far)
+        self.assertTrue((self.repo / "half.go").exists() and (self.repo / "JOURNAL.md").exists())
+        sh(self.repo, "git", "checkout", "-q", "main")
+        lp._reset_to_main()                       # an interruption keeps the kept work...
+        self.assertTrue(lp._has_wip("foundry/T-001"))
+        lp._reset_to_main("foundry/T-001")        # ...a failure that isn't kept drops it
+        self.assertFalse(lp._has_wip("foundry/T-001"))
 
     def test_deleting_protected_file_rejected(self):
         (self.repo / "MISSION.md").unlink()
@@ -511,6 +540,19 @@ class GitHubFlaky(unittest.TestCase):
         with mock.patch.object(git, "gh", lambda *a, **k: ""):
             self.assertEqual(git.ensure_deploy_key(cfg, "me/x"), key)
         self.assertTrue(key.exists() and Path(f"{key}.pub").exists())
+
+
+class Server(unittest.TestCase):
+    def test_dead_child_server_is_reaped_not_killed(self):
+        import time as _time
+        with tempfile.TemporaryDirectory() as d:
+            cfg = {"paths": {"state": Path(d)}}
+            proc = subprocess.Popen(["true"])
+            _time.sleep(0.3)  # exited, not yet waited for: a zombie that still answers kill(0)
+            (Path(d) / "server.pid").write_text(str(proc.pid))
+            self.assertIsNone(serve.pid(cfg))
+            serve.stop(cfg)  # no PermissionError, pidfile cleaned up
+            self.assertFalse((Path(d) / "server.pid").exists())
 
 
 class Status(unittest.TestCase):

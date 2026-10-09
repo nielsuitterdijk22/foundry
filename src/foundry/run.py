@@ -32,6 +32,7 @@ Then:
 1. Write or extend tests that encode the acceptance check. Run them and watch them fail.
 2. Implement until they pass. Keep the change small and focused on this task.
 3. Run ./check and fix everything it reports until it exits 0.
+   Work in small steps: change files with targeted edits rather than rewriting whole files.
 4. Append any non-obvious design decision to DECISIONS.md (date, decision, why).
 5. Write .foundry/demo.sh: a short bash script that shows the owner this change working from the
    outside — run the CLI, or start the server in the background, curl the new endpoint and stop
@@ -58,8 +59,8 @@ USER_STORIES.md, DECISIONS.md, the last entries of JOURNAL.md, and enough of the
 exists. If .foundry/suite.md exists, it lists the other products' backlogs.
 
 Then append 3-8 new tasks under "## Todo" in BACKLOG.md that move the project toward the
-user stories that are not yet satisfied, most valuable first. Each task must be small enough
-for one focused session and use exactly this format:
+user stories that are not yet satisfied, most valuable first. Each task must be """ + backlog.TASK_SIZE + """,
+and use exactly this format:
 
 ### T-NNN: <imperative title>
 - Story: <US-id(s)>
@@ -243,13 +244,31 @@ class Loop:
         if branch:
             git.git(self.repo, "branch", "-D", branch, check=False)
 
+    def _start_branch(self, branch: str) -> str:
+        """Check out the task's branch: continue kept work (WIP commits ahead of main, brought up to
+        date with main) or start fresh from main. Returns a diffstat of the kept work, or ''."""
+        if self._has_wip(branch):
+            git.git(self.repo, "checkout", branch)
+            try:
+                git.git(self.repo, "merge", "-q", "--no-edit", self.main)
+                return git.git(self.repo, "diff", "--stat", f"{self.main}...{branch}")
+            except RuntimeError:  # conflicts with main: start over rather than fight it
+                git.git(self.repo, "merge", "--abort", check=False)
+        git.git(self.repo, "checkout", "-B", branch, self.main)
+        return ""
+
+    def _has_wip(self, branch: str) -> bool:
+        return bool(git.git(self.repo, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}", check=False)) and \
+            bool(git.git(self.repo, "log", "--oneline", f"{self.main}..{branch}", check=False))
+
     def _abort_attempt(self, count: bool):
         st = self._state()
         if not st.get("in_progress"):
             return
         sandbox.kill(f"foundry-{self.name}")
         sandbox.kill(f"foundry-{self.name}-check")
-        self._reset_to_main(st.get("branch"))
+        branch = st.get("branch")  # kept work from earlier attempts survives an interruption
+        self._reset_to_main(None if branch and self._has_wip(branch) else branch)
         st["in_progress"] = False
         if count:
             st.setdefault("notes", []).append(f"attempt {st['attempt']}: interrupted (crash) — no result")
@@ -270,7 +289,10 @@ class Loop:
     # ---------- iterations ----------
 
     def _iteration(self):
-        serve.ensure(self.cfg)
+        try:
+            serve.ensure(self.cfg)
+        except RuntimeError as e:
+            raise Fatal(str(e)) from None
         self._sync()
         bl = backlog.load(self.repo)
         if not bl.todo:
@@ -287,12 +309,16 @@ class Loop:
         n, max_n = st["attempt"], self.cfg["run"]["max_attempts"]
         print(f"[foundry] {task.id} attempt {n}/{max_n}: {task.title}", flush=True)
 
-        git.git(self.repo, "checkout", "-B", st["branch"], self.main)
+        so_far = self._start_branch(st["branch"])
         work = self.repo / ".foundry"
         work.mkdir(exist_ok=True)
         (work / "summary.md").unlink(missing_ok=True)
         (work / "demo.sh").unlink(missing_ok=True)
         notes = "\n".join(f"- {x}" for x in st["notes"]) or "- none (first attempt)"
+        if so_far:
+            notes += ("\n\n## Work so far — continue it, don't start over\nAn earlier attempt ran out of time. Its changes "
+                      f"are already in /work (files changed vs {self.main}):\n```\n{so_far}\n```\n"
+                      "Check what is done and what is missing, then finish the task.")
         (work / "task.md").write_text(f"{task.render()}\n## Earlier attempts\n{notes}\n")
 
         tag = f"{task.id}-a{n}"
@@ -344,13 +370,21 @@ class Loop:
         if failure:
             print(f"[foundry] {tag} failed: {failure}", flush=True)
             last = (check_tail.splitlines()[-15:] if check_tail else [])
-            st["notes"].append(f"attempt {n}: {failure}. Agent summary: "
-                               f"{(_section(summary, 'Done') or res.final_text)[:600]!r}"
+            # Out of time (or tokens) with sound partial work: keep it, the next attempt continues.
+            keep = res.stopped in ("timeout", "tokens") and bool(changed) and verdict.ok
+            st["notes"].append(f"attempt {n}: {failure}" + (" (its work is kept and continued)" if keep else "")
+                               + f". Agent summary: {(_section(summary, 'Done') or res.final_text)[:600]!r}"
                                + ("\n  ./check tail:\n    " + "\n    ".join(last) if last else ""))
             st["in_progress"] = False
             self._save(st)
-            self._metric(outcome="failed", reason=failure, **metric)
-            self._reset_to_main(st["branch"])
+            self._metric(outcome="failed", reason=failure, kept=keep, **metric)
+            if keep:
+                git.git(self.repo, "add", "-A")
+                git.git(self.repo, "commit", "-qm", f"WIP {task.id}: attempt {n} stopped at the {res.stopped} cap")
+                self._reset_to_main()
+                print(f"[foundry] {tag}: partial work kept on {st['branch']}", flush=True)
+            else:
+                self._reset_to_main(st["branch"])
             if n >= max_n:
                 self._park(st, failure)
             return

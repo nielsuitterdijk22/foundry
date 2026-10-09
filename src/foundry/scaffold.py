@@ -79,7 +79,7 @@ USER_STORIES.md:
 {existing}
 {peers}
 Rules:
-- Each task fits one focused session (a few files) and leaves ./check green.
+- Each task is """ + backlog.TASK_SIZE.replace("{", "{{").replace("}", "}}") + """.
 - Order so each task builds on earlier ones; foundations first.
 - "accept" must be a concrete automated check: tests to add (names) or a command and its expected output.
 - 8-15 tasks covering the "must" features first.
