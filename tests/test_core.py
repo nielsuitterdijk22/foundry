@@ -7,7 +7,7 @@ import unittest
 import unittest.mock
 from pathlib import Path
 
-from foundry import backlog, git, guards, inbox, llm, run, scaffold, serve, showcase, stacks
+from foundry import agent, backlog, git, guards, inbox, llm, run, scaffold, serve, showcase, stacks
 
 
 def sh(cwd, *args):
@@ -567,6 +567,17 @@ class GitHubFlaky(unittest.TestCase):
         with mock.patch.object(git, "gh", lambda *a, **k: ""):
             self.assertEqual(git.ensure_deploy_key(cfg, "me/x"), key)
         self.assertTrue(key.exists() and Path(f"{key}.pub").exists())
+
+
+class Agent(unittest.TestCase):
+    def test_what_counts_as_changing_a_file(self):
+        bash = lambda c: {"tool": "bash", "state": {"input": {"command": c}}}
+        self.assertTrue(agent._writes({"tool": "edit"}))
+        self.assertTrue(agent._writes(bash("cat > /work/a.go <<'EOF'\npackage a\nEOF")))
+        self.assertTrue(agent._writes(bash("cd /work && sed -i 's/a/b/' x.go")))
+        self.assertFalse(agent._writes(bash("grep -rn quota /work/backend | head")))
+        self.assertFalse(agent._writes(bash("sed -n '1,60p' internal/store/db/projects.sql.go")))
+        self.assertFalse(agent._writes({"tool": "read"}))
 
 
 class Server(unittest.TestCase):

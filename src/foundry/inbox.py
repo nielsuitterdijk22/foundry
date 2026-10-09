@@ -236,8 +236,9 @@ class Inbox:
             name, bl = lp.repo.name, backlog.load(lp.repo)
             stuck = list(bl.sections["Parked"])
             ls = lp._state()
-            if ls.get("task") and not ls.get("in_progress") and sum("cap hit" in n for n in ls.get("notes", [])) >= 2:
-                stuck += [t for t in bl.todo if t.id == ls["task"]]  # out of time twice, even continuing: too big
+            if ls.get("task") and not ls.get("in_progress") and \
+                    sum("cap hit" in n or "explored only" in n for n in ls.get("notes", [])) >= 2:
+                stuck += [t for t in bl.todo if t.id == ls["task"]]  # twice out of time / never started: too big
             for t in stuck:
                 cto = _cto_lines(t)
                 if any("superseded by" in ln or "dropped" in ln for ln in cto):

@@ -333,6 +333,8 @@ class Loop:
         (work / "task.md").write_text(f"{task.render()}\n## Earlier attempts\n{notes}\n")
 
         tag = f"{task.id}-a{n}"
+        if (self.logs / f"{tag}.jsonl").exists():  # a reworked task counts attempts afresh
+            tag += f"-{datetime.now():%m%d-%H%M}"
         prompt = TASK_PROMPT.format(
             id=task.id, title=task.title,
             tests_clause=" (this task explicitly allows changing tests; explain why in summary.md)"
@@ -340,7 +342,8 @@ class Loop:
         res = agent.run(self.cfg, self.repo, prompt, name=f"foundry-{self.name}",
                         log=self.logs / f"{tag}.jsonl",
                         timeout_min=self.cfg["run"]["task_timeout"],
-                        token_budget=self.cfg["run"]["task_token_budget"], label=tag)
+                        token_budget=self.cfg["run"]["task_token_budget"], label=tag,
+                        stall_min=self.cfg["run"].get("stall_timeout", 20))
         if not serve.healthy(self.cfg):
             # Infrastructure failure, not the model's: don't count the attempt.
             self.server_crashes = getattr(self, "server_crashes", 0) + 1
@@ -361,6 +364,9 @@ class Loop:
         failure, check_tail = "", ""
         if res.stopped in ("timeout", "tokens"):
             failure = f"stopped: {res.stopped} cap hit"
+        elif res.stopped == "stalled" and not changed:
+            failure = (f"stopped: explored only — no file changed in {self.cfg['run'].get('stall_timeout', 20)} min "
+                       "(the task needs a smaller, more concrete first step)")
         elif not changed:
             failure = "agent made no changes" + (f" ({res.stopped})" if res.stopped else "")
         elif not verdict.ok:
@@ -383,9 +389,10 @@ class Loop:
             print(f"[foundry] {tag} failed: {failure}", flush=True)
             last = (check_tail.splitlines()[-15:] if check_tail else [])
             # Out of time (or tokens) with sound partial work: keep it, the next attempt continues.
-            keep = res.stopped in ("timeout", "tokens") and bool(changed) and verdict.ok
+            keep = res.stopped in ("timeout", "tokens", "stalled") and bool(changed) and verdict.ok
             st["notes"].append(f"attempt {n}: {failure}" + (" (its work is kept and continued)" if keep else "")
-                               + f". Agent summary: {(_section(summary, 'Done') or res.final_text)[:600]!r}"
+                               + (f". What it found:\n{res.findings[:1500]}" if res.findings else
+                                  f". Agent summary: {(_section(summary, 'Done') or res.final_text)[:600]!r}")
                                + ("\n  ./check tail:\n    " + "\n    ".join(last) if last else ""))
             st["in_progress"] = False
             self._save(st)

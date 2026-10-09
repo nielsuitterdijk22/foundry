@@ -13,13 +13,14 @@ from . import sandbox, ui
 
 @dataclass
 class AgentResult:
-    stopped: str = ""           # "" (finished), "timeout", "tokens", "error", "interrupted"
+    stopped: str = ""           # "" (finished), "timeout", "tokens", "stalled", "error", "interrupted"
     tokens_in: int = 0          # uncached input tokens
     tokens_cached: int = 0
     tokens_out: int = 0         # output + reasoning
     steps: int = 0
     seconds: float = 0.0
     final_text: str = ""
+    findings: str = ""          # the agent's last session summary: what it learned, worth passing on
     errors: list[str] = field(default_factory=list)
 
     @property
@@ -48,8 +49,23 @@ def describe(part: dict) -> str:
     return f"  {mark} {tool:<6} {_clip(target)}"
 
 
+WRITE_TOOLS = {"write", "edit", "multiedit", "patch"}
+
+
+def _writes(part: dict) -> bool:
+    """Did this tool call change a file (an edit tool, or a shell command that writes)?"""
+    if part.get("tool") in WRITE_TOOLS:
+        return True
+    cmd = ((part.get("state") or {}).get("input") or {}).get("command", "") if part.get("tool") == "bash" else ""
+    return any(w in cmd for w in (" > /work", ">> /work", "cat >", "tee ", "sed -i", "gofmt -w", "go mod tidy",
+                                  "npm install", "mv ", "cp ", "rm "))
+
+
 def run(cfg: dict, repo: Path, prompt: str, *, name: str, log: Path,
-        timeout_min: float, token_budget: int, label: str = "agent") -> AgentResult:
+        timeout_min: float, token_budget: int, label: str = "agent",
+        stall_min: float | None = None) -> AgentResult:
+    """One agent session. Stops at the time cap, the token budget, or — with stall_min — when no
+    file has been changed that many minutes in (it is only exploring: the task needs a smaller step)."""
     argv = sandbox.run_cmd(cfg, repo, ["opencode", "run", "--format", "json", "--auto", prompt],
                            name=name)
     res = AgentResult()
@@ -62,12 +78,18 @@ def run(cfg: dict, repo: Path, prompt: str, *, name: str, log: Path,
         sandbox.kill(name)
 
     deadline = start + timeout_min * 60
+    stall_at = start + stall_min * 60 if stall_min else None
+    wrote = threading.Event()
     done = threading.Event()
 
     def watchdog() -> None:  # wall clock, so time asleep still counts
         while not done.wait(5):
             if time.time() > deadline:
                 stop("timeout")
+                return
+            if stall_at and not wrote.is_set() and time.time() > stall_at:
+                status.print(f"  ! no file changed in {stall_min:.0f} min — stopping (exploring only)")
+                stop("stalled")
                 return
 
     threading.Thread(target=watchdog, daemon=True).start()
@@ -102,6 +124,8 @@ def run(cfg: dict, repo: Path, prompt: str, *, name: str, log: Path,
                         status.print(f"  ! token budget ({token_budget:,}) exceeded — stopping")
                         stop("tokens")
                 elif kind == "tool_use":
+                    if _writes(part):
+                        wrote.set()
                     status.print(describe(part))
                     status.update(f"step {res.steps + 1} · {tokens()} · ran {part.get('tool')}")
                 elif kind == "text" and part.get("text", "").strip():
@@ -124,6 +148,8 @@ def run(cfg: dict, repo: Path, prompt: str, *, name: str, log: Path,
     if proc.returncode != 0 and not res.stopped:
         res.stopped = "error"
     res.final_text = texts[-1] if texts else ""
+    # OpenCode's session summaries ("## Objective ... ## Discoveries ...") hold what the agent learned.
+    res.findings = next((t for t in reversed(texts) if t.startswith("## ") and len(t) > 300), "")
     return res
 
 

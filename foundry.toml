@@ -35,6 +35,7 @@ extra_args = []                    # passed verbatim to mlx_lm.server
 [run]
 max_attempts = 3                   # failed attempts before a task is parked
 task_timeout = 60                  # wall-clock cap per attempt
+stall_timeout = 20                 # stop an attempt that changed no file in this many minutes
 task_token_budget = 1_500_000      # new tokens processed per attempt (uncached input + output)
 check_timeout = 20                 # cap for one ./check run
 protected = ["SUITE.md", "MISSION.md", "FEATURES.md", "USER_STORIES.md"]
