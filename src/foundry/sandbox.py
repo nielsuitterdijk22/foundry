@@ -66,8 +66,10 @@ def opencode_config(cfg: dict) -> str:
                 },
             }
         },
+        # The container is the boundary (only /work and the package cache are mounted), so paths
+        # outside /work, like /tmp, are fine; denying them only made agents fight refusals.
         "permission": {"*": "allow", "webfetch": "deny", "websearch": "deny",
-                       "external_directory": "deny"},
+                       "external_directory": "allow"},
     })
 
 

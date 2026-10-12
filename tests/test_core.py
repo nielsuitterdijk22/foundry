@@ -632,6 +632,25 @@ class View(unittest.TestCase):
                                                                     "metadata": {"exit": 1, "output": ""}}}))
         self.assertIsNotNone(a.first_write)
 
+    def test_reads_and_searches_collapse_to_one_line(self):
+        read = lambda f: {"tool": "read", "state": {"status": "completed", "input": {"filePath": f"/work/backend/{f}"}}}
+        grep = {"tool": "grep", "state": {"status": "completed", "input": {"pattern": "quota"}}}
+        parts = [read("a.go"), read("b.go"), read("a.go"), read("c.go"), read("d.go"), grep]
+        self.assertTrue(all(view.quiet(p) for p in parts))
+        self.assertFalse(view.quiet({"tool": "read", "state": {"status": "error"}}))
+        self.assertEqual(view.ANSI.sub("", view.quiet_line(parts)), "  ◦ read 5 · a.go, b.go, c.go (+1)  │  grep 1 · quota")
+        sh_ = lambda c, code=0: {"tool": "bash", "state": {"status": "completed", "input": {"command": c},
+                                                           "metadata": {"exit": code}}}
+        self.assertTrue(view.quiet(sh_("cd /work && grep -rn quota backend | head -20; ls backend")))
+        self.assertTrue(view.quiet(sh_("sed -n '1,200p' backend/internal/config/config.go")))
+        self.assertTrue(view.quiet(sh_("ls x 2>/dev/null")))
+        self.assertTrue(view.quiet(sh_('grep -rn "plan\\|tier" backend --include="*.go" | head -20')))
+        self.assertFalse(view.quiet(sh_('echo "a > b" > out.txt')))
+        self.assertFalse(view.quiet(sh_("go test ./...")))                 # runs things: own line
+        self.assertFalse(view.quiet(sh_("cat a > b")))                     # writes
+        self.assertFalse(view.quiet(sh_("grep -rn x .", code=1)))          # failed: own line
+        self.assertIn("shell 2 · grep, sed", view.ANSI.sub("", view.quiet_line([sh_("cd /work && grep x ."), sh_("sed -n 1p a")])))
+
     def test_card(self):
         c = view.card("Quill T-1 merged as abc", True, ["one", "", "two"])
         self.assertTrue(c.splitlines()[0].startswith("╭─ ✓ Quill T-1 merged as abc"))

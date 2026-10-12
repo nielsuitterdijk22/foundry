@@ -104,6 +104,12 @@ def run(cfg: dict, repo: Path, prompt: str, *, name: str, log: Path,
     threading.Thread(target=watchdog, daemon=True).start()
     texts = []
     status = ui.Status(label, panel=a.panel)
+    looked: list[dict] = []  # consecutive reads/greps, printed as one line
+
+    def flush_looked():
+        if looked:
+            status.print(view.quiet_line(looked))
+            looked.clear()
     status.update("starting sandbox")
 
     def tokens() -> str:
@@ -135,9 +141,17 @@ def run(cfg: dict, repo: Path, prompt: str, *, name: str, log: Path,
                         status.print(f"  ! token budget ({token_budget:,}) exceeded — stopping")
                         stop("tokens")
                 elif kind == "tool_use":
-                    status.print(a.tool(part))
+                    line = a.tool(part)
+                    if view.quiet(part):
+                        looked.append(part)
+                        if len(looked) >= 8:
+                            flush_looked()
+                    else:
+                        flush_looked()
+                        status.print(line)
                     status.update(f"step {res.steps + 1} · {tokens()} · ran {part.get('tool')}")
                 elif kind == "text" and part.get("text", "").strip():
+                    flush_looked()
                     texts.append(part["text"].strip())
                     if part["text"].strip().startswith("## ") and len(part["text"]) > 300:
                         a.summaries += 1
@@ -149,6 +163,7 @@ def run(cfg: dict, repo: Path, prompt: str, *, name: str, log: Path,
                 elif kind == "error":
                     res.errors.append(json.dumps(ev.get("error"))[:500])
                     status.print(view.red(f"  ! error: {_clip(json.dumps(ev.get('error')), 200)}"))
+        flush_looked()
         proc.wait()
     except KeyboardInterrupt:
         stop("interrupted")

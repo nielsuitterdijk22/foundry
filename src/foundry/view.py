@@ -199,7 +199,11 @@ def describe(part: dict) -> str:
     secs = (t.get("end", 0) - t.get("start", 0)) / 1000 if t.get("end") else 0
     took = f" {dim(f'{secs:.1f}s')}" if secs >= 1 else ""
     if state.get("status") == "error":
-        err = state.get("error") or state.get("output") or ""
+        err = str(state.get("error") or state.get("output") or "")
+        if "prevents you from using this specific tool call" in err:
+            err = "refused by OpenCode's permission rules"
+        if "notes.md" in str(inp.get("filePath", "")) and "not found" in err.lower():
+            return dim("  ◦ notes  none yet (first attempt at this task)")
         return f"  {red('✗')} {name:<6} {_clip(inp.get('command') or _rel(inp.get('filePath', '')), 70)}  {red(_clip(err, 80))}"
     if name == "edit":
         fd = meta.get("filediff") if isinstance(meta.get("filediff"), dict) else {}
@@ -224,6 +228,58 @@ def describe(part: dict) -> str:
         return f"  {magenta('☰')} plan   {done}/{len(todos)} done" + (f" · now: {_clip(now, 70)}" if now else "")
     target = inp.get("filePath") or inp.get("path") or inp.get("pattern") or inp.get("url") or (json.dumps(inp) if inp else "")
     return dim(f"  ◦ {name:<6} {_clip(_rel(target), 100)}")
+
+
+QUIET_TOOLS = ("read", "grep", "glob", "list")
+
+
+LOOK_COMMANDS = {"cat", "grep", "rg", "ls", "sed", "head", "tail", "find", "wc", "tree", "echo", "pwd", "which",
+                 "file", "stat", "sort", "uniq", "awk", "cut", "diff", "git", "true"}
+
+
+def _unquote(cmd: str) -> str:
+    """Blank out quoted strings, so a grep pattern like "a\\|b" isn't read as a pipe."""
+    return re.sub(r"'[^']*'|\"(?:\\.|[^\"\\])*\"", "''", cmd)
+
+
+def _looks_only(cmd: str) -> bool:
+    """A shell command that only looks: every piece starts with a read-only tool, nothing is written."""
+    cmd = _unquote(cmd)
+    if re.search(r"(?<![0-9&])>(?!&)|\btee\b|sed\s+-i|\brm\b|\bmv\b|\bcp\b|\bmkdir\b|\btouch\b", cmd):
+        return False
+    pieces = [x.strip() for x in re.split(r"&&|\|\||;|\|", cmd) if x.strip()]
+    pieces = [x for x in pieces if not x.startswith("cd ")]
+    return bool(pieces) and all(x.split()[0] in LOOK_COMMANDS for x in pieces)
+
+
+def quiet(part: dict) -> bool:
+    """Look-around calls (reads, searches, read-only shell commands that worked) that only matter in bulk."""
+    state = part.get("state") or {}
+    if state.get("status") == "error":
+        return False
+    if part.get("tool") == "bash":
+        code = (state.get("metadata") or {}).get("exit")
+        return code in (0, None, "0") and _looks_only((state.get("input") or {}).get("command", ""))
+    return part.get("tool") in QUIET_TOOLS
+
+
+def quiet_line(parts: list[dict]) -> str:
+    """Consecutive look-around calls as one line: `◦ read 4 · a.go, b.go, c.go (+1) · grep 2`."""
+    by_tool: dict[str, list[str]] = {}
+    for p in parts:
+        inp = (p.get("state") or {}).get("input") or {}
+        if p.get("tool") == "bash":  # name the commands: "shell 4 · grep, cat, sed"
+            words = [x.strip().split()[0] for x in re.split(r"&&|\|\||;|\|", _unquote(inp.get("command", ""))) if x.strip()]
+            by_tool.setdefault("shell", []).append(next((w for w in words if w != "cd"), "sh"))
+            continue
+        target = inp.get("filePath") or inp.get("pattern") or inp.get("path") or ""
+        by_tool.setdefault(p.get("tool", "?"), []).append(_rel(str(target)).split("/")[-1] if p.get("tool") == "read" else str(target))
+    chunks = []
+    for tool, targets in by_tool.items():
+        shown = list(dict.fromkeys(targets))
+        names = ", ".join(_clip(t, 40) for t in shown[:3]) + (f" (+{len(shown) - 3})" if len(shown) > 3 else "")
+        chunks.append(f"{tool} {len(targets)} · {names}")
+    return dim("  ◦ " + "  │  ".join(chunks))
 
 
 def agent_text(text: str) -> str | None:

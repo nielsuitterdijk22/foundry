@@ -56,7 +56,7 @@ Hard rules, enforced by the harness (violations discard all your work):
 - Never delete, skip or weaken existing tests or assertions{tests_clause}, and never change
   ./check, CI workflows or linter/type-checker configuration.
 - Do not run git commands that change anything (commit, checkout, reset, stash); the harness owns git.
-- Stay inside /work. The network only reaches package registries.
+- Keep your work inside /work (scratch files in /tmp are fine). The network only reaches package registries.
 """
 
 PLAN_PROMPT = """You are the planner for the project in /work. No human is available; never ask questions.
