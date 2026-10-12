@@ -164,6 +164,16 @@ class GitRepo(unittest.TestCase):
         (self.repo / "check").write_text("#!/bin/sh\nexit 0\n")
         self.assertIn("changed check config check", self.inspect().flagged)
 
+    def test_skip_without_a_database_is_not_weakening(self):
+        (self.repo / "db_test.go").write_text(
+            'package a\nimport ("os"; "testing")\nfunc TestDB(t *testing.T) {\n'
+            '\tdsn := os.Getenv("QUILL_TEST_DATABASE_URL")\n\tif dsn == "" {\n\t\tt.Skip("no database")\n\t}\n'
+            '\tif dsn == "x" { t.Fatal("x") }\n}\n')
+        self.assertTrue(self.inspect().ok)
+        (self.repo / "b_test.go").write_text(
+            'package a\nimport "testing"\nfunc TestC(t *testing.T) { t.Skip("flaky") }\n')
+        self.assertIn("b_test.go: adds skip/ignore/only", self.inspect().flagged)
+
 
 class Backlog(unittest.TestCase):
     def make(self):
@@ -349,7 +359,8 @@ class Inbox(unittest.TestCase):
         ])}
         # ids: 0 new low, 1 immediate, 2 high just looked, 3 high stale, 4 overdue, 5 overdue just looked,
         #      6 low looked 90 min ago, 7 done
-        due = lambda planning: [it["id"] for it in self.suite.inbox.due({"items": items}, planning, now)]
+        def due(planning):
+            return [it["id"] for it in self.suite.inbox.due({"items": items}, planning, now)]
         self.assertEqual(due(False), ["4", "1", "3", "0"])  # earliest deadline first
         self.assertEqual(due(True), ["4", "1", "3", "6", "0"])  # 6 is due Oct 15, 0 Oct 21
         self.assertTrue(inbox.overdue(items["4"], now))
@@ -445,6 +456,21 @@ class Inbox(unittest.TestCase):
             self.suite.inbox.process()
         md = showcase.render(self.cfg, __import__("datetime").datetime.now())
         self.assertNotIn("CTO asks", md)
+
+    def test_one_explored_only_attempt_goes_to_the_cto(self):
+        quill = self.suite.loops[0]
+        bl = backlog.Backlog()
+        bl.sections["Todo"] = backlog.from_items([{"title": "Bootstrap tenant"}])
+        backlog.save(quill.repo, bl)
+        quill._save({"task": "T-001", "attempt": 1, "in_progress": False, "notes": [
+            "attempt 1: stopped: explored only — no file changed in 20 min"]})
+        st = {"items": {}}
+        self.suite.inbox._collect(st)
+        self.assertEqual([(i["kind"], i["task"]) for i in st["items"].values()], [("stuck", "T-001")])
+        quill._save({"task": "T-001", "attempt": 1, "in_progress": False, "notes": ["attempt 1: stopped: timeout cap hit"]})
+        st = {"items": {}}
+        self.suite.inbox._collect(st)
+        self.assertEqual(st["items"], {})  # one time-out: the next attempt continues the kept work
 
     def test_split_keeps_order_and_ignores_a_rework_of_the_original(self):
         from unittest import mock
@@ -613,6 +639,35 @@ class Sandbox(unittest.TestCase):
         self.assertEqual(list(perm["external_directory"].items()), [("*", "deny"), ("/tmp", "allow"), ("/tmp/*", "allow")])
 
 
+    def test_each_repo_gets_its_own_test_database(self):
+        from foundry import sandbox
+        env = sandbox.database_env(Path("/x/Quill"))
+        self.assertEqual(env["QUILL_TEST_DATABASE_URL"], "postgres://postgres@foundry-pg:5432/quill?sslmode=disable")
+        self.assertEqual(env["TEST_DATABASE_URL"], env["QUILL_TEST_DATABASE_URL"])
+        cfg = {"model": {"id": "m", "context": 65536, "max_output": 8192}, "server": {"port": 8080},
+               "sandbox": {"cpus": 1, "memory": "1g", "image": "img"}}
+        argv = sandbox.run_cmd(cfg, Path("/x/Quill"), ["true"], name="n")
+        self.assertIn(f"QUILL_TEST_DATABASE_URL={env['TEST_DATABASE_URL']}", argv)
+
+
+class RepoMap(unittest.TestCase):
+    def test_one_greppable_line_per_declaration(self):
+        from foundry import repomap
+        with tempfile.TemporaryDirectory() as d:
+            repo = Path(d)
+            sh(repo, "git", "init", "-q", "-b", "main")
+            (repo / "pkg").mkdir()
+            (repo / "pkg" / "t.go").write_text("package pkg\n\ntype Tenant struct {\n}\n\nfunc NewTenant() *Tenant {\n\treturn nil\n}\n")
+            (repo / "vendor").mkdir()
+            (repo / "vendor" / "v.go").write_text("package v\nfunc Hidden() {}\n")
+            (repo / "app.py").write_text("import os\n\nclass App:\n    def run(self):\n        pass\n")
+            sh(repo, "git", "add", "-A")
+            m = repomap.build(repo)
+        self.assertIn("pkg/t.go:3: type Tenant struct\npkg/t.go:6: func NewTenant() *Tenant\n", m)
+        self.assertIn("app.py:3: class App:", m)
+        self.assertNotIn("Hidden", m)
+        self.assertNotIn("def run", m)  # top level only
+
 class View(unittest.TestCase):
     def test_fit_counts_only_visible_characters(self):
         colored = "\033[32m" + "x" * 50 + "\033[0m"
@@ -641,14 +696,16 @@ class View(unittest.TestCase):
         self.assertIsNotNone(a.first_write)
 
     def test_reads_and_searches_collapse_to_one_line(self):
-        read = lambda f: {"tool": "read", "state": {"status": "completed", "input": {"filePath": f"/work/backend/{f}"}}}
+        def read(f):
+            return {"tool": "read", "state": {"status": "completed", "input": {"filePath": f"/work/backend/{f}"}}}
         grep = {"tool": "grep", "state": {"status": "completed", "input": {"pattern": "quota"}}}
         parts = [read("a.go"), read("b.go"), read("a.go"), read("c.go"), read("d.go"), grep]
         self.assertTrue(all(view.quiet(p) for p in parts))
         self.assertFalse(view.quiet({"tool": "read", "state": {"status": "error"}}))
         self.assertEqual(view.ANSI.sub("", view.quiet_line(parts)), "  ◦ read 5 · a.go, b.go, c.go (+1)  │  grep 1 · quota")
-        sh_ = lambda c, code=0: {"tool": "bash", "state": {"status": "completed", "input": {"command": c},
-                                                           "metadata": {"exit": code}}}
+        def sh_(c, code=0):
+            return {"tool": "bash", "state": {"status": "completed", "input": {"command": c},
+                                                                   "metadata": {"exit": code}}}
         self.assertTrue(view.quiet(sh_("cd /work && grep -rn quota backend | head -20; ls backend")))
         self.assertTrue(view.quiet(sh_("sed -n '1,200p' backend/internal/config/config.go")))
         self.assertTrue(view.quiet(sh_("ls x 2>/dev/null")))

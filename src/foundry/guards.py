@@ -14,6 +14,18 @@ ASSERT = re.compile(r"\bt\.(Error|Errorf|Fatal|Fatalf|Fail)\b|\b(assert|require)
                     r"\bassert(_eq|_ne)?!|\bexpect\s*\(|^\s*assert\b", re.M)
 SKIP = re.compile(r"\bt\.Skip|#\[ignore\]|\.(skip|todo|only)\s*\(|\bx(it|describe)\s*\(|"
                   r"pytest\.mark\.(skip|xfail)|@unittest\.skip", re.M)
+# Reading the environment: a skip right after one is the standard "no database here" gate.
+ENV_READ = re.compile(r"os\.Getenv|os\.LookupEnv|os\.environ|os\.getenv|process\.env|env::var|std::env")
+GATE_LINES = 4  # how far above a skip the environment check may be
+
+
+def _ungated_skips(text: str) -> int:
+    """Skips not guarded by an environment check in the lines just above them."""
+    lines = text.splitlines()
+    return sum(1 for i, ln in enumerate(lines) if SKIP.search(ln)
+               and not ENV_READ.search("\n".join(lines[max(0, i - GATE_LINES):i + 1])))
+
+
 # Files that define what "green" means. Changing them weakens the gate.
 CHECK_INFRA = re.compile(r"^(check|\.github/workflows/.*|\.golangci\.ya?ml|clippy\.toml|"
                          r"rustfmt\.toml|eslint\.config\.\w+|\.eslintrc.*|tsconfig.*\.json|"
@@ -52,7 +64,7 @@ def inspect(repo: Path, base: str, protected: list[str], tests_may_change: bool)
         a_before, a_after = len(ASSERT.findall(old)), len(ASSERT.findall(new))
         if a_after < a_before:
             v.flagged.append(f"{path}: assertions {a_before} → {a_after}")
-        if len(SKIP.findall(new)) > len(SKIP.findall(old)):
+        if _ungated_skips(new) > _ungated_skips(old):
             v.flagged.append(f"{path}: adds skip/ignore/only")
     if v.flagged and not tests_may_change:
         v.rejected += [f"weakens tests or checks: {f}" for f in v.flagged]

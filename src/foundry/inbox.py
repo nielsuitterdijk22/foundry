@@ -49,7 +49,10 @@ engineering problems: handle it yourself. {deadline}
 Usually the task is too big for one 60-minute agent session: split it into 2-4 smaller tasks for
 {product} (position "top"; each comfortably one session; the first ones lay groundwork). They replace
 it, and whatever needed it will need the last of them. If the attempts show a misunderstanding
-instead, "rework" it with concrete guidance. Drop it only if it isn't needed.""",
+instead, "rework" it with concrete guidance. Drop it only if it isn't needed.
+If an attempt "explored only", the task was too vague to start: the agent read code for 20 minutes
+without finding a first edit. Use what it found to name, in each new task, the files or functions
+to change first and the concrete result (a migration, a CLI command, an endpoint, a test).""",
     "question": """An agent in {product} finished {task} and left a question. Answer it yourself:
 technical, architectural and cross-product contract questions are yours to decide, not the
 owner's. {deadline}
@@ -236,9 +239,11 @@ class Inbox:
             name, bl = lp.repo.name, backlog.load(lp.repo)
             stuck = list(bl.sections["Parked"])
             ls = lp._state()
-            if ls.get("task") and not ls.get("in_progress") and \
-                    sum("cap hit" in n or "explored only" in n for n in ls.get("notes", [])) >= 2:
-                stuck += [t for t in bl.todo if t.id == ls["task"]]  # twice out of time / never started: too big
+            notes = ls.get("notes", [])
+            if ls.get("task") and not ls.get("in_progress") and (
+                    any("explored only" in n for n in notes) or sum("cap hit" in n for n in notes) >= 2):
+                # Never found where to start (too vague), or twice out of time (too big): the CTO reshapes it.
+                stuck += [t for t in bl.todo if t.id == ls["task"]]
             for t in stuck:
                 cto = _cto_lines(t)
                 if any("superseded by" in ln or "dropped" in ln for ln in cto):

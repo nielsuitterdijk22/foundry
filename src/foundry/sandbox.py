@@ -10,12 +10,15 @@ cannot commit, add hooks or change git config. All git writes happen on the host
 import json
 import re
 import subprocess
+import time
 from pathlib import Path
 
 from . import config
 
 NETWORK = "foundry-int"
 PROXY = "foundry-proxy"
+POSTGRES = "foundry-pg"  # a throwaway database for tests that need one; reachable only on foundry-int
+POSTGRES_IMAGE = "postgres:16-alpine"
 
 
 def _docker(*args, check=True, capture=True) -> subprocess.CompletedProcess:
@@ -73,15 +76,50 @@ def opencode_config(cfg: dict) -> str:
     })
 
 
+def ensure_postgres(repo: Path) -> None:
+    """Start the shared test database if needed and give `repo` its own database in it.
+
+    Best effort: without it, tests that need a database skip, as they do anywhere else."""
+    try:
+        running = _docker("inspect", "-f", "{{.State.Running}}", POSTGRES, check=False)
+        if running.returncode != 0 or running.stdout.strip() != "true":
+            _docker("rm", "-f", POSTGRES, check=False)
+            _docker("run", "-d", "--name", POSTGRES, "--restart", "unless-stopped", "--network", NETWORK,
+                    "-e", "POSTGRES_HOST_AUTH_METHOD=trust", "--tmpfs", "/var/lib/postgresql/data",
+                    POSTGRES_IMAGE)
+        for _ in range(30):
+            if _docker("exec", POSTGRES, "pg_isready", "-U", "postgres", check=False).returncode == 0:
+                break
+            time.sleep(1)
+        db = _db_name(repo)
+        exists = _docker("exec", POSTGRES, "psql", "-U", "postgres", "-tAc",
+                         f"SELECT 1 FROM pg_database WHERE datname = '{db}'", check=False)
+        if exists.stdout.strip() != "1":
+            _docker("exec", POSTGRES, "createdb", "-U", "postgres", db, check=False)
+    except (OSError, subprocess.SubprocessError) as e:
+        print(f"[foundry] test database unavailable ({e}); database tests will skip", flush=True)
+
+
+def _db_name(repo: Path) -> str:
+    return re.sub(r"\W", "_", repo.name.lower())
+
+
+def database_env(repo: Path) -> dict:
+    """The variables tests read for their database: <REPO>_TEST_DATABASE_URL, plus generic names."""
+    url = f"postgres://postgres@{POSTGRES}:5432/{_db_name(repo)}?sslmode=disable"
+    return {f"{_db_name(repo).upper()}_TEST_DATABASE_URL": url, "TEST_DATABASE_URL": url}
+
+
 def run_cmd(cfg: dict, repo: Path, cmd: list[str], *, name: str,
             interactive: bool = False) -> list[str]:
     """docker run argv for `cmd` inside the sandbox with `repo` at /work."""
     proxy = f"http://{PROXY}:8888"
     env = {
         "HTTP_PROXY": proxy, "HTTPS_PROXY": proxy, "http_proxy": proxy, "https_proxy": proxy,
-        "NO_PROXY": PROXY, "no_proxy": PROXY,
+        "NO_PROXY": f"{PROXY},{POSTGRES}", "no_proxy": f"{PROXY},{POSTGRES}",
         "npm_config_proxy": proxy, "npm_config_https_proxy": proxy,
         "OPENCODE_CONFIG_CONTENT": opencode_config(cfg),
+        **database_env(repo),
     }
     argv = ["docker", "run", "--rm", "--name", name, "--init",
             "--network", NETWORK,

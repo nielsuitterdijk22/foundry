@@ -13,7 +13,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from . import agent, backlog, config, git, guards, inbox, sandbox, serve, showcase, view
+from . import agent, backlog, config, git, guards, inbox, repomap, sandbox, serve, showcase, view
 
 LOOP_OWNED = ["BACKLOG.md", "JOURNAL.md", "FEEDBACK.md"]  # restored if the agent edits them
 
@@ -29,7 +29,8 @@ Before changing anything, read in this order:
 3. .foundry/task.md: your task, its acceptance check, and notes from earlier failed attempts.
 
 Your context is limited: when it fills up, the session is summarized and you lose what you read.
-So: find code with grep and read large files in parts (offset/limit) rather than whole; don't
+So: find code with grep — .foundry/map.md lists every file's functions and types with line
+numbers; grep it first — and read large files in parts (offset/limit) rather than whole; don't
 re-read a file you already studied. Keep .foundry/notes.md up to date as you go — the files and
 functions that matter, decisions made, what's done and what's left. After a summary (or when it
 already exists from an earlier attempt), read .foundry/notes.md first and continue from it.
@@ -57,6 +58,9 @@ Hard rules, enforced by the harness (violations discard all your work):
   ./check, CI workflows or linter/type-checker configuration.
 - Do not run git commands that change anything (commit, checkout, reset, stash); the harness owns git.
 - Keep your work inside /work (scratch files in /tmp are fine). The network only reaches package registries.
+- A throwaway PostgreSQL 16 database is available: its URL is in $TEST_DATABASE_URL and in
+  <REPO NAME>_TEST_DATABASE_URL (e.g. QUILL_TEST_DATABASE_URL). Tests that need a database may
+  skip when that variable is unset, but not otherwise. Don't download or embed database servers.
 """
 
 PLAN_PROMPT = """You are the planner for the project in /work. No human is available; never ask questions.
@@ -188,6 +192,7 @@ class Loop:
         except RuntimeError as e:
             raise Fatal(str(e)) from None
         sandbox.ensure_proxy(self.cfg)
+        sandbox.ensure_postgres(self.repo)
         st = self._state()
         if st.get("merged"):
             print(f"[foundry] finishing bookkeeping for {st['task']} (merged {st['merged']} before a crash)")
@@ -337,10 +342,12 @@ class Loop:
         (work / "demo.sh").unlink(missing_ok=True)
         notes = "\n".join(f"- {x}" for x in st["notes"]) or "- none (first attempt)"
         if so_far:
-            notes += ("\n\n## Work so far — continue it, don't start over\nAn earlier attempt ran out of time. Its changes "
+            notes += ("\n\n## Work so far — continue it, don't start over\nAn earlier attempt didn't finish (see the "
+                      "notes above for why: fix that first). Its changes "
                       f"are already in /work (files changed vs {self.main}):\n```\n{so_far}\n```\n"
                       "Check what is done and what is missing, then finish the task.")
         (work / "task.md").write_text(f"{task.render()}\n## Earlier attempts\n{notes}\n")
+        (work / "map.md").write_text(repomap.build(self.repo))
 
         tag = f"{task.id}-a{n}"
         if (self.logs / f"{tag}.jsonl").exists():  # a reworked task counts attempts afresh
@@ -399,8 +406,9 @@ class Loop:
                       **demo)
         if failure:
             last = (check_tail.splitlines()[-15:] if check_tail else [])
-            # Out of time (or tokens) with sound partial work: keep it, the next attempt continues.
-            keep = res.stopped in ("timeout", "tokens", "stalled") and bool(changed) and verdict.ok
+            # Any real work is kept and continued: out of time, ./check red or a guardrail tripped,
+            # the next attempt fixes what's wrong instead of redoing an hour of work. (The notes say why.)
+            keep = bool(changed)
             print(view.card(f"{self.repo.name} {task.id} attempt {n}/{max_n}: {failure}", None if keep else False,
                             view.attempt_lines(res.view, res.seconds, [
                                 view.yellow("↻ its work is kept; the next attempt continues from it") if keep else
@@ -414,8 +422,14 @@ class Loop:
             self._save(st)
             self._metric(outcome="failed", reason=failure, kept=keep, **metric)
             if keep:
+                tracked = set(git.git(self.repo, "ls-tree", "-r", "--name-only", self.main).splitlines())
+                for path in {p for _, p in changed} & set(self.cfg["run"]["protected"]):
+                    if path in tracked:  # the owner's documents never travel with kept work
+                        git.git(self.repo, "checkout", self.main, "--", path)
+                    else:
+                        (self.repo / path).unlink(missing_ok=True)
                 git.git(self.repo, "add", "-A")
-                git.git(self.repo, "commit", "-qm", f"WIP {task.id}: attempt {n} stopped at the {res.stopped} cap")
+                git.git(self.repo, "commit", "-qm", f"WIP {task.id}: attempt {n}: {failure}"[:200])
                 self._reset_to_main()
                 print(f"[foundry] {tag}: partial work kept on {st['branch']}", flush=True)
             else:

@@ -23,7 +23,9 @@ SECTIONS = ("Todo", "Parked", "Done")
 # How big a task may be. The agent is a local model writing ~8 tokens/s with a 60-minute cap per
 # attempt, so a task must be clearly smaller than that; every prompt that creates tasks uses this.
 TASK_SIZE = ("about 30 minutes of work for the coding agent: one capability, at most 3-4 files and "
-             "roughly 300 changed lines. Split anything bigger into steps that each leave ./check green")
+             "roughly 300 changed lines, and concrete: say which files, packages or functions to change "
+             "and what exists when it's done, so the agent starts editing within minutes instead of "
+             "exploring. Split anything bigger into steps that each leave ./check green")
 HEADER = """# Backlog
 
 Ordered: agents take the top task under **Todo**, one per run. Foundry moves tasks
