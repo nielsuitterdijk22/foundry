@@ -72,6 +72,8 @@ Options (combine actions as needed):
 - "suite": a change to the suite-wide picture (customers, pricing, product boundaries, shared
   decisions). It is added to SUITE.md as an owner note for every product.
 - "rework": keep a stuck task, with concrete guidance for its next attempt.
+- "retire": take a queued task out of a product's backlog because it is obsolete (already done,
+  covered elsewhere, or no longer wanted). Tasks that needed it stop waiting for it.
 - "resolve": mark an open question you asked the owner as answered (by its id), together with the
   actions that follow from the answer.
 - defer: when it makes more sense later (it depends on work that isn't done, or a product isn't
@@ -97,6 +99,7 @@ Reply with JSON only:
               {{"kind": "feedback", "product": "<name>", "text": "<direction for its agents>"}},
               {{"kind": "suite", "text": "<the owner note>"}},
               {{"kind": "rework", "product": "<name>", "task": "<T-NNN>", "guidance": "<what to do differently>"}},
+              {{"kind": "retire", "product": "<name>", "task": "<T-NNN>", "why": "<one sentence>"}},
               {{"kind": "resolve", "id": "<id of the open question>"}}]}}"""
 
 SUBJECT = {"thought": "The owner's thought", "stuck": "The stuck task", "question": "The agent's question"}
@@ -338,7 +341,7 @@ class Inbox:
                 plan += [(lp, a) for lp in self.loops]
             elif a.get("kind") == "resolve":
                 continue
-            elif (lp := by_name.get(str(a.get("product", "")).lower())) and a.get("kind") in ("task", "feedback", "rework"):
+            elif (lp := by_name.get(str(a.get("product", "")).lower())) and a.get("kind") in ("task", "feedback", "rework", "retire"):
                 plan.append((lp, a))
             else:
                 raise ValueError(f"can't apply {a.get('kind')!r} to product {a.get('product')!r}")
@@ -348,7 +351,8 @@ class Inbox:
             plan = [(lp, a) for lp, a in plan if not (a["kind"] == "rework" and lp is home and a.get("task") == item["task"])]
         replaced = home is not None and bool(retire or split)
         touched = {}
-        for lp in [lp for lp, _ in plan] + (self.loops if replaced else []):
+        rewires = replaced or any(a["kind"] == "retire" for _, a in plan)  # Needs may change in every repo
+        for lp in [lp for lp, _ in plan] + (self.loops if rewires else []):
             if lp not in touched:  # sync every repo first, so a dirty or diverged one fails before any write
                 lp._sync()
                 touched[lp] = set()
@@ -394,6 +398,23 @@ class Inbox:
                     lp._save({})  # a fresh set of attempts
                 touched[lp].add("BACKLOG.md")
                 did.append(f"{lp.repo.name}/{t.id} reworked: {a.get('guidance', '').strip()[:120]}")
+            elif a["kind"] == "retire":
+                bl = backlog.load(lp.repo)
+                t = next((t for t in bl.todo + bl.sections["Parked"] if t.id == a.get("task")), None)
+                if t is None:
+                    raise ValueError(f"no queued task {a.get('task')} in {lp.repo.name}")
+                if t in bl.todo:
+                    bl.move(t.id, "Parked")
+                t.body = t.body.rstrip() + f"\n- CTO ({today}): dropped — {a.get('why', '').strip()}\n"
+                backlog.save(lp.repo, bl)
+                git.git(lp.repo, "branch", "-D", f"foundry/{t.id}", check=False)
+                if lp._state().get("task") == t.id and not lp._state().get("in_progress"):
+                    lp._save({})
+                for other in self.loops:
+                    if _rewire(other.repo, lp.repo.name, t.id, None, same=other is lp):
+                        touched[other].add("BACKLOG.md")
+                touched[lp].add("BACKLOG.md")
+                did.append(f"{lp.repo.name}/{t.id} dropped: {a.get('why', '').strip()[:120]}")
             elif a["kind"] == "feedback":
                 header = (f"## {today} — from the owner, via the CTO ({item['prio']} priority)" if kind == "thought"
                           else f"## {today} — decided by the CTO")
@@ -478,14 +499,22 @@ def _cto_lines(t: backlog.Task) -> list[str]:
     return [ln for ln in t.body.splitlines() if ln.startswith("- CTO (")]
 
 
-def _rewire(repo, product: str, old: str, new: str, same: bool) -> bool:
-    """Tasks that needed `old` (replaced by a split) now need `new`, its last replacement."""
+def _rewire(repo, product: str, old: str, new: str | None, same: bool) -> bool:
+    """Tasks that needed `old` (replaced by a split) now need `new`, its last replacement;
+    with `new` None (`old` was dropped) they stop needing it."""
     bl = backlog.load(repo)
     ref = rf"(?<![\w/-]){old}\b" if same else rf"\b{re.escape(product)}/{old}\b"
-    sub = new if same else f"{product}/{new}"
+    sub = (new if same else f"{product}/{new}") if new else ""
+
+    def fix(m):
+        line = re.sub(ref, sub, m.group(1))
+        if new is None:  # tidy the list: "- Needs: T-1, , T-3" → "- Needs: T-1, T-3"; nothing left → no line
+            items = [x.strip() for x in line.split(":", 1)[1].split(",") if x.strip()]
+            line = f"{line.split(':', 1)[0]}: {', '.join(items)}" if items else ""
+        return line
     changed = False
     for t in bl.todo + bl.sections["Parked"]:
-        body = re.sub(r"^(- Needs:.*)$", lambda m: re.sub(ref, sub, m.group(1)), t.body, flags=re.M | re.I)
+        body = re.sub(r"^(- Needs:.*)$\n?", lambda m: (fix(m) + "\n") if fix(m) else "", t.body, flags=re.M | re.I)
         if body != t.body:
             t.body, changed = body, True
     if changed:

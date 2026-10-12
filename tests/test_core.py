@@ -457,6 +457,26 @@ class Inbox(unittest.TestCase):
         md = showcase.render(self.cfg, __import__("datetime").datetime.now())
         self.assertNotIn("CTO asks", md)
 
+    def test_retire_drops_a_queued_task_and_unblocks_what_needed_it(self):
+        quill, tempo = self.suite.loops
+        bl = backlog.Backlog()
+        bl.sections["Todo"] = backlog.from_items([{"title": "Fix tsconfig"}, {"title": "Keep"},
+                                                  {"title": "Feature", "needs": ["T-001", "T-002"]}])
+        backlog.save(quill.repo, bl)
+        bl = backlog.Backlog()
+        bl.sections["Todo"] = backlog.from_items([{"title": "Use it", "needs": ["Quill/T-001"]}])
+        backlog.save(tempo.repo, bl)
+        inbox.add(self.cfg, "acme", "Quill's check is green; the tsconfig task is obsolete", "high")
+        with self.reply({"decision": "act", "why": "obsolete", "actions": [
+                {"kind": "retire", "product": "Quill", "task": "T-001", "why": "check is green"}]}):
+            self.suite.inbox.process()
+        qbl = backlog.load(quill.repo)
+        self.assertEqual([t.title for t in qbl.todo], ["Keep", "Feature"])
+        self.assertIn("dropped — check is green", qbl.sections["Parked"][0].body)
+        self.assertEqual(qbl.todo[1].field("Needs"), "T-002")
+        self.assertEqual(backlog.load(tempo.repo).todo[0].field("Needs"), "")
+        self.assertNotIn("Needs", backlog.load(tempo.repo).todo[0].body)
+
     def test_one_explored_only_attempt_goes_to_the_cto(self):
         quill = self.suite.loops[0]
         bl = backlog.Backlog()
