@@ -605,6 +605,14 @@ class Agent(unittest.TestCase):
             self.assertEqual(agent.changes(repo), {"a.go": [2, 1], "new.go": [2, 0]})
 
 
+class Sandbox(unittest.TestCase):
+    def test_only_tmp_is_allowed_outside_the_repo(self):
+        from foundry import sandbox
+        cfg = {"model": {"id": "m", "context": 65536, "max_output": 8192}, "server": {"port": 8080}}
+        perm = json.loads(sandbox.opencode_config(cfg))["permission"]
+        self.assertEqual(list(perm["external_directory"].items()), [("*", "deny"), ("/tmp", "allow"), ("/tmp/*", "allow")])
+
+
 class View(unittest.TestCase):
     def test_fit_counts_only_visible_characters(self):
         colored = "\033[32m" + "x" * 50 + "\033[0m"

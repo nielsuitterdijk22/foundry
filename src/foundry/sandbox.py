@@ -66,10 +66,10 @@ def opencode_config(cfg: dict) -> str:
                 },
             }
         },
-        # The container is the boundary (only /work and the package cache are mounted), so paths
-        # outside /work, like /tmp, are fine; denying them only made agents fight refusals.
+        # Outside /work only /tmp, for scratch files (backups, temp builds). Rules are checked in
+        # order and the last match wins: everything else outside the repo stays denied.
         "permission": {"*": "allow", "webfetch": "deny", "websearch": "deny",
-                       "external_directory": "allow"},
+                       "external_directory": {"*": "deny", "/tmp": "allow", "/tmp/*": "allow"}},
     })
 
 
