@@ -21,6 +21,20 @@ IDLE_RETRY = 20 * 60                 # after a clean stop
 HEALTHY_RUN = 30 * 60                # a run that lasted this long resets the crash count
 
 
+def _held_by_other_run(cfg: dict, suite: str) -> int | None:
+    """The pid of a live process holding one of the suite's repo locks, if any."""
+    from . import scaffold
+    for name in scaffold.suite_state(cfg, suite)["adopted"] or []:
+        lock = config.state_dir(cfg, "locks") / f"{name.lower()}.lock"
+        try:
+            pid = int(lock.read_text())
+            os.kill(pid, 0)
+            return pid
+        except (FileNotFoundError, ValueError, ProcessLookupError, PermissionError):
+            continue
+    return None
+
+
 def main(cfg: dict, args: list[str]) -> int:
     if not args:
         sys.exit("usage: foundry supervise <suite>")
@@ -44,7 +58,15 @@ def main(cfg: dict, args: list[str]) -> int:
     signal.signal(signal.SIGINT, stop)
 
     say(f"[supervise] watching suite {suite} (log: {log_path})")
+    waiting = False
     while True:
+        if holder := _held_by_other_run(cfg, suite):  # e.g. started by hand in a terminal: let it be
+            if not waiting:
+                say(f"[supervise] another run (pid {holder}) is working on the suite; taking over when it ends")
+            waiting = True
+            time.sleep(60)
+            continue
+        waiting = False
         started = time.time()
         child = subprocess.Popen([sys.executable, "-u", "-m", "foundry", "run", "--suite", suite],
                                  stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, cwd=config.ROOT,
