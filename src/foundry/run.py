@@ -52,10 +52,9 @@ Then:
    ## Questions (anything the owner should decide; "none" if nothing)
    ## Follow-ups (work you noticed but did not do; "none" if nothing)
 
-Hard rules, enforced by the harness (violations discard all your work):
+Hard rules, enforced by the harness (a violation fails the attempt):
 - Never edit SUITE.md, MISSION.md, FEATURES.md or USER_STORIES.md.
-- Never delete, skip or weaken existing tests or assertions{tests_clause}, and never change
-  ./check, CI workflows or linter/type-checker configuration.
+{gate_rule}
 - Do not run git commands that change anything (commit, checkout, reset, stash); the harness owns git.
 - Keep your work inside /work (scratch files in /tmp are fine). The network only reaches package registries.
 - A throwaway PostgreSQL 16 database is available: its URL is in $TEST_DATABASE_URL and in
@@ -354,8 +353,11 @@ class Loop:
             tag += f"-{datetime.now():%m%d-%H%M}"
         prompt = TASK_PROMPT.format(
             id=task.id, title=task.title,
-            tests_clause=" (this task explicitly allows changing tests; explain why in summary.md)"
-            if task.tests_may_change else "")
+            gate_rule="- This task explicitly allows changing tests, ./check, CI workflows and linter/type-checker\n"
+                      "  configuration when the task needs it. Never weaken them just to get green; explain every\n"
+                      "  such change in summary.md." if task.tests_may_change else
+                      "- Never delete, skip or weaken existing tests or assertions, and never change\n"
+                      "  ./check, CI workflows or linter/type-checker configuration.")
         live = view.Attempt(pin=f"{self.repo.name} · {task.id} {task.title} · attempt {n}/{max_n}"
                                 + (" · continuing kept work" if so_far else ""), suite_line=self.suite_line)
         res = agent.run(self.cfg, self.repo, prompt, name=f"foundry-{self.name}",

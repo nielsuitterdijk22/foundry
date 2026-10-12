@@ -151,6 +151,9 @@ Existing CI workflow(s):
 
 Rules: start with `#!/usr/bin/env bash` and `set -euo pipefail`, `cd "$(dirname "$0")"`.
 Use `npm ci` only when node_modules is missing. Echo a "== step" line before each step.
+Only run a tool where it applies: e.g. `tsc` only where a tsconfig.json exists (a plain JavaScript
+project has none, and tsc without one fails), golangci-lint only where there is Go code. Cover every
+project in the repo whose toolchain the container has; skip the others with an echo saying why.
 Reuse the repo's own commands (Makefile targets, package.json scripts) where they exist and
 don't need external services. Reply with only the script in a ```bash block."""
 
