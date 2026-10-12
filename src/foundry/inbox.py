@@ -78,7 +78,8 @@ Options (combine actions as needed):
   actions that follow from the answer.
 - defer: when it makes more sense later (it depends on work that isn't done, or a product isn't
   ready for it). Say what must happen first; you will see it again.
-- drop: only when it is already done, already covered, or not needed. Say why.
+- drop: set THIS item aside without any action, only when it is already done, already covered, or
+  not needed. Say why. (To remove tasks from a backlog, "act" with "retire" actions instead.)
 - escalate: ONLY for a decision the owner must make (customers, pricing, priorities, legal). Put
   the question in "ask_owner": one or two plain sentences, no jargon.
 
