@@ -348,8 +348,10 @@ class Inbox:
                 raise ValueError(f"can't apply {a.get('kind')!r} to product {a.get('product')!r}")
         home = by_name.get(item.get("product", "").lower()) if kind == "stuck" else None
         split = any(a["kind"] == "task" and lp is home for lp, a in plan)
-        if split:  # new tasks replace the stuck one; a "rework" of it alongside ("remove this task") is moot
-            plan = [(lp, a) for lp, a in plan if not (a["kind"] == "rework" and lp is home and a.get("task") == item["task"])]
+        if split:  # new tasks replace the stuck one; a "rework" or "retire" of it alongside is moot (and a
+            # retire would cut what needed it loose instead of pointing it at the replacements)
+            plan = [(lp, a) for lp, a in plan
+                    if not (a["kind"] in ("rework", "retire") and lp is home and a.get("task") == item["task"])]
         replaced = home is not None and bool(retire or split)
         touched = {}
         rewires = replaced or any(a["kind"] == "retire" for _, a in plan)  # Needs may change in every repo

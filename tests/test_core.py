@@ -2,7 +2,9 @@
 
 import json
 import subprocess
+import sys
 import tempfile
+import time
 import unittest
 import unittest.mock
 from pathlib import Path
@@ -496,7 +498,7 @@ class Inbox(unittest.TestCase):
         from unittest import mock
         quill = self.suite.loops[0]
         bl = backlog.Backlog()
-        bl.sections["Todo"] = backlog.from_items([{"title": "Other"}])
+        bl.sections["Todo"] = backlog.from_items([{"title": "Other", "needs": ["T-001"]}])
         bl.sections["Todo"][0].id = "T-009"
         bl.sections["Parked"] = [backlog.Task("T-001", "Too big", "- Parked: x\n")]
         backlog.save(quill.repo, bl)
@@ -504,13 +506,15 @@ class Inbox(unittest.TestCase):
             {"kind": "task", "product": "Quill", "title": "Step one", "position": "top"},
             {"kind": "task", "product": "Quill", "title": "Step two", "position": "top"},
             {"kind": "task", "product": "Quill", "title": "Step three", "position": "top"},
-            {"kind": "rework", "product": "Quill", "task": "T-001", "guidance": "Remove this task."}]}
+            {"kind": "rework", "product": "Quill", "task": "T-001", "guidance": "Remove this task."},
+            {"kind": "retire", "product": "Quill", "task": "T-001", "why": "replaced"}]}
         with mock.patch.object(scaffold, "model_json", lambda *a, **k: (reply, "")):
             self.suite.inbox.process()
         bl = backlog.load(quill.repo)
         self.assertEqual([t.title for t in bl.todo], ["Step one", "Step two", "Step three", "Other"])
         self.assertEqual([t.id for t in bl.sections["Parked"]], ["T-001"])
         self.assertIn("superseded by", bl.sections["Parked"][0].body)
+        self.assertEqual(bl.todo[3].field("Needs"), "T-012")  # needs the last step, not nothing
 
     def test_rework_then_escalate_after_two_fixes(self):
         from unittest import mock
@@ -650,6 +654,40 @@ class Agent(unittest.TestCase):
             (repo / ".foundry" / "notes.md").write_text("mine\n")  # the agent's scratch space: not a change
             self.assertEqual(agent.changes(repo), {"a.go": [2, 1], "new.go": [2, 0]})
 
+
+    def session(self, calls):
+        """agent.run against a fake OpenCode that emits one step per (command, output)."""
+        from unittest import mock
+        events = []
+        for cmd, out in calls:
+            events += [{"type": "step_start", "part": {}},
+                       {"type": "tool_use", "part": {"tool": "bash", "state": {
+                           "status": "completed", "input": {"command": cmd}, "output": out}}},
+                       {"type": "step_finish", "part": {"tokens": {"input": 10, "output": 5}}}]
+        script = "import json\nfor e in " + repr(events) + ": print(json.dumps(e), flush=True)\n"
+        with tempfile.TemporaryDirectory() as d:
+            repo = Path(d)
+            sh(repo, "git", "init", "-q", "-b", "main")
+            cfg = {"model": {"context": 65536}}
+            with mock.patch.object(agent.sandbox, "run_cmd", lambda *a, **k: [sys.executable, "-c", script]), \
+                    mock.patch.object(agent.sandbox, "kill", lambda name: None):
+                return agent.run(cfg, repo, "task", name="t", log=repo / "log.jsonl", timeout_min=5,
+                                 token_budget=10**9)
+
+    def test_a_repetition_loop_stops_the_session(self):
+        res = self.session([("ls", "a")] + [("grep -rn plan migrations", "x.sql:3: plan")] * 6)
+        self.assertEqual(res.stopped, "looping")
+        self.assertIn("grep -rn plan migrations", res.looped_on)
+
+    def test_retesting_after_edits_is_not_a_loop(self):
+        res = self.session([("go test ./...", f"FAIL: {i} left") for i in range(6)])
+        self.assertEqual(res.stopped, "")
+
+    def test_output_rate_spans_whole_steps(self):
+        a = view.Attempt(pin="x", start=time.time() - 10)
+        a.step_started()
+        a.step_finished({"output": 100})  # OpenCode reports a step only once it is done
+        self.assertLess(a.tokens_out / a.model_s, 11)
 
 class Sandbox(unittest.TestCase):
     def test_only_tmp_is_allowed_outside_the_repo(self):

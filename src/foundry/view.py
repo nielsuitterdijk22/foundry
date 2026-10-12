@@ -106,19 +106,20 @@ class Attempt:
     todos: list = field(default_factory=list)
     said: str = ""                      # the agent's latest words: its intent when it keeps no plan
     tools: dict = field(default_factory=dict)
-    model_s: float = 0.0
-    _step_t: float = 0.0
+    model_s: float = 0.0                # time spent in steps (model + its tool call)
+    _last_step: float = 0.0
 
     def step_started(self):
-        self._step_t = time.time()
+        pass  # OpenCode emits step_start only once the step is done, so it can't time anything
 
     def step_finished(self, tokens: dict):
         self.steps += 1
         self.tokens_out += tokens.get("output", 0) + tokens.get("reasoning", 0)
         self.ctx = tokens.get("input", 0) + (tokens.get("cache") or {}).get("read", 0)
         self.ctx_peak = max(self.ctx_peak, self.ctx)
-        if self._step_t:
-            self.model_s += time.time() - self._step_t
+        now = time.time()
+        self.model_s += now - (self._last_step or self.start)
+        self._last_step = now
 
     def git_changes(self, files: dict):
         """The session's real changes so far (agent.changes), polled from git."""

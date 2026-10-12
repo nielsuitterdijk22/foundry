@@ -385,6 +385,9 @@ class Loop:
         failure, check_tail = "", ""
         if res.stopped in ("timeout", "tokens"):
             failure = f"stopped: {res.stopped} cap hit"
+        elif res.stopped == "looping":
+            failure = (f"stopped: looping — the model kept repeating one call ({res.looped_on}); "
+                       "do something different next time")
         elif res.stopped == "stalled" and not changed:
             failure = (f"stopped: explored only — no file changed in {self.cfg['run'].get('stall_timeout', 20)} min "
                        "(the task needs a smaller, more concrete first step)")

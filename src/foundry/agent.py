@@ -13,7 +13,8 @@ from . import sandbox, ui, view
 
 @dataclass
 class AgentResult:
-    stopped: str = ""           # "" (finished), "timeout", "tokens", "stalled", "error", "interrupted"
+    stopped: str = ""           # "" (finished), "timeout", "tokens", "stalled", "looping", "error", "interrupted"
+    looped_on: str = ""         # the tool call the model kept repeating, when stopped == "looping"
     tokens_in: int = 0          # uncached input tokens
     tokens_cached: int = 0
     tokens_out: int = 0         # output + reasoning
@@ -31,6 +32,21 @@ class AgentResult:
     @property
     def out_tok_s(self) -> float:
         return self.tokens_out / self.seconds if self.seconds else 0.0
+
+
+# The same call with the same result 5 times within 10 calls: the model is stuck in a loop. (The
+# result counts too: edit-and-retest cycles repeat the test command, but its output changes.)
+LOOP_WINDOW, LOOP_REPEATS = 10, 5
+
+
+def _call(part: dict) -> str:
+    return f"{part.get('tool')} {json.dumps((part.get('state') or {}).get('input'), sort_keys=True)}"
+
+
+def _call_key(part: dict) -> str:
+    st = part.get("state") or {}
+    out = st.get("output") or (st.get("metadata") or {}).get("output") or st.get("error") or ""
+    return f"{_call(part)}\0{hash(str(out))}"
 
 
 def _clip(text: str, n: int = 110) -> str:
@@ -105,6 +121,7 @@ def run(cfg: dict, repo: Path, prompt: str, *, name: str, log: Path,
     texts = []
     status = ui.Status(label, panel=a.panel)
     looked: list[dict] = []  # consecutive reads/greps, printed as one line
+    recent: list[str] = []   # the last LOOP_WINDOW tool calls, to catch a repetition loop
 
     def flush_looked():
         if looked:
@@ -141,6 +158,12 @@ def run(cfg: dict, repo: Path, prompt: str, *, name: str, log: Path,
                         status.print(f"  ! token budget ({token_budget:,}) exceeded — stopping")
                         stop("tokens")
                 elif kind == "tool_use":
+                    recent = (recent + [_call_key(part)])[-LOOP_WINDOW:]
+                    if recent.count(recent[-1]) >= LOOP_REPEATS and not res.stopped:
+                        flush_looked()
+                        res.looped_on = _clip(_call(part), 300)
+                        status.print(view.red(f"  ! repeating the same call ({_clip(_call(part), 80)}) — stopping"))
+                        stop("looping")
                     line = a.tool(part)
                     if view.quiet(part):
                         looked.append(part)
