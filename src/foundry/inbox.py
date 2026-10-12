@@ -28,7 +28,7 @@ import subprocess
 import sys
 from datetime import datetime, timedelta
 
-from . import backlog, config, git, scaffold, showcase
+from . import backlog, config, git, scaffold, showcase, view
 
 PRIOS = {"immediate": timedelta(0), "high": timedelta(days=1), "med": timedelta(days=3),
          "low": timedelta(days=14)}  # priority → how long the CTO may take to act
@@ -308,7 +308,7 @@ class Inbox:
             item["status"] = "deferred"
             item["revisit_when"] = f"couldn't handle it yet: {str(e).strip().splitlines()[0] if str(e).strip() else type(e).__name__}"
         item["decided"] = item["looked"]
-        print(f"[foundry] CTO: {item['status']} — {item.get('why') or item.get('revisit_when', '')}", flush=True)
+        print(view.cto_decision(item), flush=True)
         self._answer_issue(item)
         return urgent if item["prio"] == "immediate" else []
 
@@ -338,15 +338,17 @@ class Inbox:
             else:
                 raise ValueError(f"can't apply {a.get('kind')!r} to product {a.get('product')!r}")
         home = by_name.get(item.get("product", "").lower()) if kind == "stuck" else None
-        reworked = any(a["kind"] == "rework" and lp is home and a.get("task") == item["task"] for lp, a in plan)
-        replaced = home is not None and not reworked and bool(
-            retire or any(a["kind"] == "task" and lp is home for lp, a in plan))
+        split = any(a["kind"] == "task" and lp is home for lp, a in plan)
+        if split:  # new tasks replace the stuck one; a "rework" of it alongside ("remove this task") is moot
+            plan = [(lp, a) for lp, a in plan if not (a["kind"] == "rework" and lp is home and a.get("task") == item["task"])]
+        replaced = home is not None and bool(retire or split)
         touched = {}
         for lp in [lp for lp, _ in plan] + (self.loops if replaced else []):
             if lp not in touched:  # sync every repo first, so a dirty or diverged one fails before any write
                 lp._sync()
                 touched[lp] = set()
         did, urgent, today = [], [], f"{datetime.now():%Y-%m-%d}"
+        top_at = {}  # several "top" tasks for one product go first, in the order the CTO gave them
         for a in actions:
             if a.get("kind") == "resolve" and (q := self._st["items"].get(a.get("id", ""))) and q["status"] == "escalated":
                 q.update(status="done", why=f"answered by the owner: {item['text'][:200]}")
@@ -361,7 +363,11 @@ class Inbox:
                 bl = backlog.load(lp.repo)
                 t = backlog.from_items([{**a, "story": "(owner thought)" if kind == "thought" else "(CTO)"}])[0]
                 t.id = bl.next_id()
-                bl.todo.insert(0, t) if a.get("position") == "top" else bl.todo.append(t)
+                if a.get("position") == "top":
+                    bl.todo.insert(top_at.get(lp, 0), t)
+                    top_at[lp] = top_at.get(lp, 0) + 1
+                else:
+                    bl.todo.append(t)
                 backlog.save(lp.repo, bl)
                 touched[lp].add("BACKLOG.md")
                 did.append(f"{lp.repo.name}/{t.id}{' (top)' if a.get('position') == 'top' else ''}: {t.title}")

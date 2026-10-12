@@ -27,6 +27,12 @@ def status(cfg: dict, args: list[str]) -> int:
     md = _two_lines_per_entry(md)
     md = re.sub(r"\[!\[check\]\([^)]*\)\]\([^)]*\)", "", md)           # badges don't render here
     md = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", md)                    # links: keep the text
+    from . import inbox, run, scaffold, view
+    for suite in inbox.suites(cfg):  # the same board the suite run prints between tasks
+        members = scaffold.suite_state(cfg, suite)["adopted"] or []
+        loops = [run.Loop(cfg, config.repo_path(cfg, n)) for n in members if (config.repo_path(cfg, n) / ".git").exists()]
+        if loops:
+            print(view.suite_board(cfg, scaffold.suite_state(cfg, suite)["name"] or suite, loops) + "\n")
     print(md.split("\n", 2)[2] if md.startswith("# ") else md)
     print("## Running now\n" + ("\n".join(running) if running else "Nothing — start with `foundry run --suite <suite>`"))
     url = ""

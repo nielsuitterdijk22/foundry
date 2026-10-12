@@ -8,7 +8,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import sandbox, ui
+from . import sandbox, ui, view
 
 
 @dataclass
@@ -22,6 +22,7 @@ class AgentResult:
     final_text: str = ""
     findings: str = ""          # the agent's last session summary: what it learned, worth passing on
     errors: list[str] = field(default_factory=list)
+    view: object = None         # view.Attempt: the live statistics, for the end-of-attempt card
 
     @property
     def budget_used(self) -> int:
@@ -35,18 +36,6 @@ class AgentResult:
 def _clip(text: str, n: int = 110) -> str:
     text = " ".join(str(text).split())
     return text if len(text) <= n else text[: n - 1] + "…"
-
-
-def describe(part: dict) -> str:
-    """One line for a tool call: `bash   go test ./...`, `edit   lru/lru.go`."""
-    state = part.get("state") or {}
-    inp = state.get("input") or {}
-    tool = part.get("tool", "?")
-    target = (inp.get("command") or inp.get("filePath") or inp.get("path") or inp.get("pattern")
-              or inp.get("url") or (json.dumps(inp) if inp else ""))
-    target = str(target).replace("/work/", "")
-    mark = "✗" if state.get("status") == "error" else "▸"
-    return f"  {mark} {tool:<6} {_clip(target)}"
 
 
 WRITE_TOOLS = {"write", "edit", "multiedit", "patch"}
@@ -63,13 +52,17 @@ def _writes(part: dict) -> bool:
 
 def run(cfg: dict, repo: Path, prompt: str, *, name: str, log: Path,
         timeout_min: float, token_budget: int, label: str = "agent",
-        stall_min: float | None = None) -> AgentResult:
+        stall_min: float | None = None, attempt: "view.Attempt | None" = None) -> AgentResult:
     """One agent session. Stops at the time cap, the token budget, or — with stall_min — when no
     file has been changed that many minutes in (it is only exploring: the task needs a smaller step)."""
     argv = sandbox.run_cmd(cfg, repo, ["opencode", "run", "--format", "json", "--auto", prompt],
                            name=name)
     res = AgentResult()
     start = time.time()
+    a = attempt or view.Attempt(pin=label)
+    a.start, a.timeout_s, a.stall_s = start, timeout_min * 60, (stall_min * 60 if stall_min else None)
+    a.context_limit = cfg["model"]["context"]
+    res.view = a
     proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
 
     def stop(reason: str) -> None:
@@ -94,7 +87,7 @@ def run(cfg: dict, repo: Path, prompt: str, *, name: str, log: Path,
 
     threading.Thread(target=watchdog, daemon=True).start()
     texts = []
-    status = ui.Status(label)
+    status = ui.Status(label, panel=a.panel)
     status.update("starting sandbox")
 
     def tokens() -> str:
@@ -112,6 +105,7 @@ def run(cfg: dict, repo: Path, prompt: str, *, name: str, log: Path,
                 part = ev.get("part") or {}
                 kind = ev.get("type")
                 if kind == "step_start":
+                    a.step_started()
                     status.update(f"step {res.steps + 1} · {tokens()} · model working")
                 elif kind == "step_finish":
                     t = part.get("tokens") or {}
@@ -119,6 +113,7 @@ def run(cfg: dict, repo: Path, prompt: str, *, name: str, log: Path,
                     res.tokens_in += t.get("input", 0)
                     res.tokens_out += t.get("output", 0) + t.get("reasoning", 0)
                     res.tokens_cached += (t.get("cache") or {}).get("read", 0)
+                    a.step_finished(t)
                     status.update(f"step {res.steps} done · {tokens()}")
                     if res.budget_used > token_budget:
                         status.print(f"  ! token budget ({token_budget:,}) exceeded — stopping")
@@ -126,16 +121,20 @@ def run(cfg: dict, repo: Path, prompt: str, *, name: str, log: Path,
                 elif kind == "tool_use":
                     if _writes(part):
                         wrote.set()
-                    status.print(describe(part))
+                    status.print(a.tool(part, _writes(part)))
                     status.update(f"step {res.steps + 1} · {tokens()} · ran {part.get('tool')}")
                 elif kind == "text" and part.get("text", "").strip():
                     texts.append(part["text"].strip())
-                    status.print(f"{ui.DIM}  » {_clip(part['text'], 300)}{ui.RESET}")
+                    if part["text"].strip().startswith("## ") and len(part["text"]) > 300:
+                        a.summaries += 1
+                    else:
+                        a.said = part["text"].strip()
+                    status.print(view.agent_text(part["text"]))
                 elif kind == "reasoning" and part.get("text", "").strip():
                     status.print(f"{ui.DIM}  thinking: {_clip(part['text'], 300)}{ui.RESET}")
                 elif kind == "error":
                     res.errors.append(json.dumps(ev.get("error"))[:500])
-                    status.print(f"  ! error: {_clip(json.dumps(ev.get('error')), 200)}")
+                    status.print(view.red(f"  ! error: {_clip(json.dumps(ev.get('error')), 200)}"))
         proc.wait()
     except KeyboardInterrupt:
         stop("interrupted")

@@ -13,7 +13,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from . import agent, backlog, config, git, guards, inbox, sandbox, serve, showcase
+from . import agent, backlog, config, git, guards, inbox, sandbox, serve, showcase, view
 
 LOOP_OWNED = ["BACKLOG.md", "JOURNAL.md", "FEEDBACK.md"]  # restored if the agent edits them
 
@@ -132,6 +132,7 @@ class Loop:
         self.lock = config.state_dir(cfg, "locks") / f"{self.name}.lock"
         self.main = git.default_branch(repo)
         self.peers: list[Path] = []  # other suite repos, shown to the planner
+        self.suite_line = None         # set by Suite: the suite in one line, for the pinned panel
 
     # ---------- lifecycle ----------
 
@@ -339,11 +340,13 @@ class Loop:
             id=task.id, title=task.title,
             tests_clause=" (this task explicitly allows changing tests; explain why in summary.md)"
             if task.tests_may_change else "")
+        live = view.Attempt(pin=f"{self.repo.name} · {task.id} {task.title} · attempt {n}/{max_n}"
+                                + (" · continuing kept work" if so_far else ""), suite_line=self.suite_line)
         res = agent.run(self.cfg, self.repo, prompt, name=f"foundry-{self.name}",
                         log=self.logs / f"{tag}.jsonl",
                         timeout_min=self.cfg["run"]["task_timeout"],
                         token_budget=self.cfg["run"]["task_token_budget"], label=tag,
-                        stall_min=self.cfg["run"].get("stall_timeout", 20))
+                        stall_min=self.cfg["run"].get("stall_timeout", 20), attempt=live)
         if not serve.healthy(self.cfg):
             # Infrastructure failure, not the model's: don't count the attempt.
             self.server_crashes = getattr(self, "server_crashes", 0) + 1
@@ -386,10 +389,14 @@ class Loop:
                       followups=_section(summary, "Follow-ups"), done=_section(summary, "Done")[:1500],
                       **demo)
         if failure:
-            print(f"[foundry] {tag} failed: {failure}", flush=True)
             last = (check_tail.splitlines()[-15:] if check_tail else [])
             # Out of time (or tokens) with sound partial work: keep it, the next attempt continues.
             keep = res.stopped in ("timeout", "tokens", "stalled") and bool(changed) and verdict.ok
+            print(view.card(f"{self.repo.name} {task.id} attempt {n}/{max_n}: {failure}", None if keep else False,
+                            view.attempt_lines(res.view, res.seconds, [
+                                view.yellow("↻ its work is kept; the next attempt continues from it") if keep else
+                                (view.red("✗ parks now — the CTO takes it from here") if n >= max_n else ""),
+                                *[view.dim(ln) for ln in last[-3:]]])), flush=True)
             st["notes"].append(f"attempt {n}: {failure}" + (" (its work is kept and continued)" if keep else "")
                                + (f". What it found:\n{res.findings[:1500]}" if res.findings else
                                   f". Agent summary: {(_section(summary, 'Done') or res.final_text)[:600]!r}")
@@ -425,7 +432,12 @@ class Loop:
         self._commit_main(f"foundry: {task.id} done", ["BACKLOG.md", "JOURNAL.md"])
         self._save({})
         self._metric(outcome="merged", sha=sha, **metric)
-        print(f"[foundry] {task.id} merged as {sha}", flush=True)
+        print(view.card(f"{self.repo.name} {task.id} merged as {sha}: {task.title}", True,
+                        view.attempt_lines(res.view, res.seconds, [
+                            f"./check {view.green('✓')} · demo "
+                            + {"ok": view.green("✓"), "failed": view.red("✗"), "none": view.dim("none")}.get(
+                                metric.get("demo", "none"), "?"),
+                            *[view.dim(ln) for ln in body.splitlines()[:3]]])), flush=True)
 
     def next_task(self, bl: backlog.Backlog) -> backlog.Task:
         """The first Todo task whose Needs are all Done."""
@@ -546,6 +558,27 @@ class Suite:
         for lp in self.loops:
             lp.peers = [o.repo for o in self.loops if o is not lp]
         self.inbox = inbox.Inbox(cfg, name, self.loops) if name else None
+        cache = {"at": 0.0, "line": ""}
+
+        def line() -> str:  # the panel refreshes every second; the suite's numbers change per task
+            if time.time() - cache["at"] > 30:
+                cache.update(at=time.time(), line=view.suite_line(cfg, self.loops))
+            return cache["line"]
+        for lp in self.loops:
+            lp.suite_line = line
+        self._suite_line = line
+
+    def _why(self, lp, urgent) -> str:
+        bl = backlog.load(lp.repo)
+        if not bl.todo:
+            return "— its backlog is empty: the planner adds the next tasks"
+        try:
+            t = lp.next_task(bl)
+        except Blocked:
+            return ""
+        skipped = [f"{x.id} (waits on {', '.join(unmet(self.cfg, lp.repo, x))})" for x in bl.todo[:bl.todo.index(t)]]
+        return (f"{t.id} {t.title}" + (view.yellow("  ⚡ urgent, from the CTO") if lp in urgent else "")
+                + (view.dim(f"  · skips {', '.join(skipped)}") if skipped else ""))
 
     def _joiners(self) -> list:
         """Products `foundry cto` finished setting up after this run started join it."""
@@ -568,6 +601,7 @@ class Suite:
                 print(f"[foundry] {name} is set up but can't join the suite run yet: {e}", flush=True)
                 continue
             print(f"[foundry] {name} joins the suite run", flush=True)
+            lp.suite_line = self._suite_line
             self.loops.append(lp)
             for other in self.loops:
                 other.peers = [o.repo for o in self.loops if o is not other]
@@ -624,6 +658,7 @@ class Suite:
                     urgent = [lp for lp in self.inbox.process() if lp in active] or urgent
                 order = active[turn % len(active):] + active[:turn % len(active)]
                 current = next((lp for lp in urgent + order if lp.ready()), None)
+                rushed = [current] if current in urgent else []
                 urgent = [lp for lp in urgent if lp is not current]
                 if current and self.inbox and not backlog.load(current.repo).todo:
                     self.inbox.process(planning=True)  # about to plan: a good moment for low / deferred thoughts
@@ -640,7 +675,8 @@ class Suite:
                             lp.stopped(str(e))
                     break
                 turn = active.index(current) + 1
-                print(f"[foundry] suite → {current.name}", flush=True)
+                print("\n" + view.suite_board(self.cfg, self.name or "suite", active, current, self._why(current, rushed)),
+                      flush=True)
                 try:
                     current._iteration()
                 except Fatal:

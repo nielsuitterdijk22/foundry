@@ -7,7 +7,7 @@ import unittest
 import unittest.mock
 from pathlib import Path
 
-from foundry import agent, backlog, git, guards, inbox, llm, run, scaffold, serve, showcase, stacks
+from foundry import agent, view, backlog, git, guards, inbox, llm, run, scaffold, serve, showcase, stacks
 
 
 def sh(cwd, *args):
@@ -432,7 +432,7 @@ class Inbox(unittest.TestCase):
         with mock.patch.object(scaffold, "model_json", model):
             self.suite.inbox.process()
         qbl = backlog.load(quill.repo)
-        self.assertEqual([t.title for t in qbl.todo], ["Enforce quotas", "Quota model", "Later"])
+        self.assertEqual([t.title for t in qbl.todo], ["Quota model", "Enforce quotas", "Later"])
         old = qbl.sections["Parked"][0]
         self.assertIn("superseded by T-003, T-004", old.body)
         self.assertEqual(qbl.todo[2].field("Needs"), "T-004")                       # rewired here...
@@ -445,6 +445,26 @@ class Inbox(unittest.TestCase):
             self.suite.inbox.process()
         md = showcase.render(self.cfg, __import__("datetime").datetime.now())
         self.assertNotIn("CTO asks", md)
+
+    def test_split_keeps_order_and_ignores_a_rework_of_the_original(self):
+        from unittest import mock
+        quill = self.suite.loops[0]
+        bl = backlog.Backlog()
+        bl.sections["Todo"] = backlog.from_items([{"title": "Other"}])
+        bl.sections["Todo"][0].id = "T-009"
+        bl.sections["Parked"] = [backlog.Task("T-001", "Too big", "- Parked: x\n")]
+        backlog.save(quill.repo, bl)
+        reply = {"decision": "act", "why": "split", "actions": [
+            {"kind": "task", "product": "Quill", "title": "Step one", "position": "top"},
+            {"kind": "task", "product": "Quill", "title": "Step two", "position": "top"},
+            {"kind": "task", "product": "Quill", "title": "Step three", "position": "top"},
+            {"kind": "rework", "product": "Quill", "task": "T-001", "guidance": "Remove this task."}]}
+        with mock.patch.object(scaffold, "model_json", lambda *a, **k: (reply, "")):
+            self.suite.inbox.process()
+        bl = backlog.load(quill.repo)
+        self.assertEqual([t.title for t in bl.todo], ["Step one", "Step two", "Step three", "Other"])
+        self.assertEqual([t.id for t in bl.sections["Parked"]], ["T-001"])
+        self.assertIn("superseded by", bl.sections["Parked"][0].body)
 
     def test_rework_then_escalate_after_two_fixes(self):
         from unittest import mock
@@ -578,6 +598,40 @@ class Agent(unittest.TestCase):
         self.assertFalse(agent._writes(bash("grep -rn quota /work/backend | head")))
         self.assertFalse(agent._writes(bash("sed -n '1,60p' internal/store/db/projects.sql.go")))
         self.assertFalse(agent._writes({"tool": "read"}))
+
+
+class View(unittest.TestCase):
+    def test_fit_counts_only_visible_characters(self):
+        colored = "\033[32m" + "x" * 50 + "\033[0m"
+        self.assertEqual(view.visible_len(view.fit(colored, 20)), 20)
+        self.assertEqual(view.fit("short", 20), "short")
+
+    def test_test_counts(self):
+        self.assertEqual(view.test_counts("ok  \tgithub.com/x/a\t0.1s\nok  \tgithub.com/x/b\nFAIL\tgithub.com/x/c\n"), (2, 1))
+        self.assertEqual(view.test_counts("Tests:  1 failed, 12 passed, 13 total"), (12, 1))
+        self.assertEqual(view.test_counts("total 3\ndrwx foo"), (0, 0))
+
+    def test_attempt_tracks_edits_plan_and_tests(self):
+        a = view.Attempt(pin="Quill · T-1", timeout_s=3600, stall_s=1200)
+        a.tool({"tool": "edit", "state": {"status": "completed", "input": {"filePath": "/work/a.go"},
+                                          "metadata": {"filediff": {"file": "/work/a.go", "additions": 12, "deletions": 3}}}}, True)
+        a.tool({"tool": "write", "state": {"status": "completed", "input": {"filePath": "/work/b.go", "content": "a\nb\nc"}}}, True)
+        a.tool({"tool": "todowrite", "state": {"status": "completed", "metadata": {"todos": [
+            {"content": "model", "status": "completed"}, {"content": "middleware", "status": "in_progress"}]}}}, False)
+        a.tool({"tool": "bash", "state": {"status": "completed", "input": {"command": "go test ./..."},
+                                          "metadata": {"exit": 1, "output": "ok  \tx/a\nFAIL\tx/b\n"}}}, False)
+        self.assertEqual(a.files, {"a.go": [12, 3], "b.go": [3, 0]})
+        self.assertEqual(a.tests, (1, 1))
+        panel = "\n".join(a.panel())
+        self.assertIn("1/2  middleware", panel)
+        self.assertIn("2 files +15 −3", panel)
+        self.assertIn("✗ exit 1", a.tool({"tool": "bash", "state": {"status": "completed", "input": {"command": "false"},
+                                                                    "metadata": {"exit": 1, "output": ""}}}, False))
+
+    def test_card(self):
+        c = view.card("Quill T-1 merged as abc", True, ["one", "", "two"])
+        self.assertTrue(c.splitlines()[0].startswith("╭─ ✓ Quill T-1 merged as abc"))
+        self.assertEqual([ln[2:] for ln in c.splitlines()[1:3]], ["one", "two"])
 
 
 class Server(unittest.TestCase):
