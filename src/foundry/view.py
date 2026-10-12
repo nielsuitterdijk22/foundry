@@ -120,25 +120,19 @@ class Attempt:
         if self._step_t:
             self.model_s += time.time() - self._step_t
 
-    def tool(self, part: dict, wrote: bool) -> str:
+    def git_changes(self, files: dict):
+        """The session's real changes so far (agent.changes), polled from git."""
+        self.files = files
+        if files and self.first_write is None:
+            self.first_write = time.time()
+
+    def tool(self, part: dict) -> str:
         """Record a tool call and return its display line."""
         state = part.get("state") or {}
-        inp, meta = state.get("input") or {}, state.get("metadata") or {}
+        meta = state.get("metadata") or {}
         name = part.get("tool", "?")
         self.tools[name] = self.tools.get(name, 0) + 1
-        if wrote and self.first_write is None:
-            self.first_write = time.time()
-        if name == "edit" and isinstance(meta.get("filediff"), dict):
-            fd = meta["filediff"]
-            f = self.files.setdefault(_rel(fd.get("file", inp.get("filePath", "?"))), [0, 0])
-            f[0] += fd.get("additions", 0)
-            f[1] += fd.get("deletions", 0)
-        elif name == "write":
-            path = _rel(inp.get("filePath", "?"))
-            lines = str(inp.get("content", "")).count("\n") + 1
-            f = self.files.setdefault(path, [0, 0])
-            f[0] += lines
-        elif name == "todowrite" and isinstance(meta.get("todos"), list):
+        if name == "todowrite" and isinstance(meta.get("todos"), list):
             self.todos = meta["todos"]
         elif name == "bash":
             out = str(meta.get("output") or state.get("output") or "")

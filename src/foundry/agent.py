@@ -38,23 +38,30 @@ def _clip(text: str, n: int = 110) -> str:
     return text if len(text) <= n else text[: n - 1] + "…"
 
 
-WRITE_TOOLS = {"write", "edit", "multiedit", "patch"}
-
-
-def _writes(part: dict) -> bool:
-    """Did this tool call change a file (an edit tool, or a shell command that writes)?"""
-    if part.get("tool") in WRITE_TOOLS:
-        return True
-    cmd = ((part.get("state") or {}).get("input") or {}).get("command", "") if part.get("tool") == "bash" else ""
-    return any(w in cmd for w in (" > /work", ">> /work", "cat >", "tee ", "sed -i", "gofmt -w", "go mod tidy",
-                                  "npm install", "mv ", "cp ", "rm "))
+def changes(repo: Path) -> dict[str, list[int]]:
+    """What this session changed so far, per file: [added, deleted] lines, from git (the truth,
+    however the agent wrote it). Relative to HEAD, so kept work from earlier attempts doesn't count."""
+    def git_out(*args):
+        return subprocess.run(["git", "--no-optional-locks", *args], cwd=repo, capture_output=True,
+                              text=True, timeout=30).stdout
+    out = {}
+    for line in git_out("diff", "--numstat", "HEAD").splitlines():
+        added, deleted, path = (line.split("\t", 2) + ["", ""])[:3]
+        out[path] = [int(added) if added.isdigit() else 0, int(deleted) if deleted.isdigit() else 0]
+    for path in git_out("ls-files", "--others", "--exclude-standard").splitlines():
+        try:
+            with open(repo / path, "rb") as f:
+                out[path] = [f.read(2_000_000).count(b"\n"), 0]
+        except OSError:
+            continue
+    return {p: v for p, v in out.items() if p and not p.startswith(".foundry/")}
 
 
 def run(cfg: dict, repo: Path, prompt: str, *, name: str, log: Path,
         timeout_min: float, token_budget: int, label: str = "agent",
         stall_min: float | None = None, attempt: "view.Attempt | None" = None) -> AgentResult:
-    """One agent session. Stops at the time cap, the token budget, or — with stall_min — when no
-    file has been changed that many minutes in (it is only exploring: the task needs a smaller step)."""
+    """One agent session. Stops at the time cap, the token budget, or — with stall_min — when git
+    shows no changed file that many minutes in (it is only exploring: the task needs a smaller step)."""
     argv = sandbox.run_cmd(cfg, repo, ["opencode", "run", "--format", "json", "--auto", prompt],
                            name=name)
     res = AgentResult()
@@ -76,7 +83,16 @@ def run(cfg: dict, repo: Path, prompt: str, *, name: str, log: Path,
     done = threading.Event()
 
     def watchdog() -> None:  # wall clock, so time asleep still counts
+        polled = 0.0
         while not done.wait(5):
+            if time.time() - polled >= 10:  # what really changed, for the panel and the stall check
+                polled = time.time()
+                try:
+                    a.git_changes(changes(repo))
+                    if a.files:
+                        wrote.set()
+                except (OSError, subprocess.SubprocessError):
+                    pass
             if time.time() > deadline:
                 stop("timeout")
                 return
@@ -119,9 +135,7 @@ def run(cfg: dict, repo: Path, prompt: str, *, name: str, log: Path,
                         status.print(f"  ! token budget ({token_budget:,}) exceeded — stopping")
                         stop("tokens")
                 elif kind == "tool_use":
-                    if _writes(part):
-                        wrote.set()
-                    status.print(a.tool(part, _writes(part)))
+                    status.print(a.tool(part))
                     status.update(f"step {res.steps + 1} · {tokens()} · ran {part.get('tool')}")
                 elif kind == "text" and part.get("text", "").strip():
                     texts.append(part["text"].strip())

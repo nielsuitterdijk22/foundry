@@ -590,14 +590,19 @@ class GitHubFlaky(unittest.TestCase):
 
 
 class Agent(unittest.TestCase):
-    def test_what_counts_as_changing_a_file(self):
-        bash = lambda c: {"tool": "bash", "state": {"input": {"command": c}}}
-        self.assertTrue(agent._writes({"tool": "edit"}))
-        self.assertTrue(agent._writes(bash("cat > /work/a.go <<'EOF'\npackage a\nEOF")))
-        self.assertTrue(agent._writes(bash("cd /work && sed -i 's/a/b/' x.go")))
-        self.assertFalse(agent._writes(bash("grep -rn quota /work/backend | head")))
-        self.assertFalse(agent._writes(bash("sed -n '1,60p' internal/store/db/projects.sql.go")))
-        self.assertFalse(agent._writes({"tool": "read"}))
+    def test_changes_come_from_git(self):
+        with tempfile.TemporaryDirectory() as d:
+            repo = Path(d)
+            sh(repo, "git", "init", "-q", "-b", "main")
+            (repo / "a.go").write_text("one\ntwo\n")
+            sh(repo, "git", "add", "-A")
+            sh(repo, "git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "init")
+            self.assertEqual(agent.changes(repo), {})
+            (repo / "a.go").write_text("one\n2\nthree\n")          # 2 added, 1 deleted
+            (repo / "new.go").write_text("x\ny\n")                  # untracked: 2 lines
+            (repo / ".foundry").mkdir()
+            (repo / ".foundry" / "notes.md").write_text("mine\n")  # the agent's scratch space: not a change
+            self.assertEqual(agent.changes(repo), {"a.go": [2, 1], "new.go": [2, 0]})
 
 
 class View(unittest.TestCase):
@@ -613,20 +618,19 @@ class View(unittest.TestCase):
 
     def test_attempt_tracks_edits_plan_and_tests(self):
         a = view.Attempt(pin="Quill · T-1", timeout_s=3600, stall_s=1200)
-        a.tool({"tool": "edit", "state": {"status": "completed", "input": {"filePath": "/work/a.go"},
-                                          "metadata": {"filediff": {"file": "/work/a.go", "additions": 12, "deletions": 3}}}}, True)
-        a.tool({"tool": "write", "state": {"status": "completed", "input": {"filePath": "/work/b.go", "content": "a\nb\nc"}}}, True)
+        a.git_changes({"a.go": [12, 3], "b.go": [3, 0]})
         a.tool({"tool": "todowrite", "state": {"status": "completed", "metadata": {"todos": [
-            {"content": "model", "status": "completed"}, {"content": "middleware", "status": "in_progress"}]}}}, False)
+            {"content": "model", "status": "completed"}, {"content": "middleware", "status": "in_progress"}]}}})
         a.tool({"tool": "bash", "state": {"status": "completed", "input": {"command": "go test ./..."},
-                                          "metadata": {"exit": 1, "output": "ok  \tx/a\nFAIL\tx/b\n"}}}, False)
+                                          "metadata": {"exit": 1, "output": "ok  \tx/a\nFAIL\tx/b\n"}}})
         self.assertEqual(a.files, {"a.go": [12, 3], "b.go": [3, 0]})
         self.assertEqual(a.tests, (1, 1))
         panel = "\n".join(a.panel())
         self.assertIn("1/2  middleware", panel)
         self.assertIn("2 files +15 −3", panel)
         self.assertIn("✗ exit 1", a.tool({"tool": "bash", "state": {"status": "completed", "input": {"command": "false"},
-                                                                    "metadata": {"exit": 1, "output": ""}}}, False))
+                                                                    "metadata": {"exit": 1, "output": ""}}}))
+        self.assertIsNotNone(a.first_write)
 
     def test_card(self):
         c = view.card("Quill T-1 merged as abc", True, ["one", "", "two"])

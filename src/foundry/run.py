@@ -28,6 +28,13 @@ Before changing anything, read in this order:
    then AGENTS.md (working rules), then DECISIONS.md.
 3. .foundry/task.md: your task, its acceptance check, and notes from earlier failed attempts.
 
+Your context is limited: when it fills up, the session is summarized and you lose what you read.
+So: find code with grep and read large files in parts (offset/limit) rather than whole; don't
+re-read a file you already studied. Keep .foundry/notes.md up to date as you go — the files and
+functions that matter, decisions made, what's done and what's left. After a summary (or when it
+already exists from an earlier attempt), read .foundry/notes.md first and continue from it.
+Start changing files early; don't explore for more than about 10 minutes.
+
 Then:
 1. Write or extend tests that encode the acceptance check. Run them and watch them fail.
 2. Implement until they pass. Keep the change small and focused on this task.
@@ -324,6 +331,8 @@ class Loop:
         so_far = self._start_branch(st["branch"])
         work = self.repo / ".foundry"
         work.mkdir(exist_ok=True)
+        if n == 1 and not so_far:
+            (work / "notes.md").unlink(missing_ok=True)  # notes belong to one task's attempts
         (work / "summary.md").unlink(missing_ok=True)
         (work / "demo.sh").unlink(missing_ok=True)
         notes = "\n".join(f"- {x}" for x in st["notes"]) or "- none (first attempt)"
