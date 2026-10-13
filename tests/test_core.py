@@ -959,5 +959,28 @@ class Misc(unittest.TestCase):
             self.assertTrue(check.stat().st_mode & 0o111, stack)
 
 
+class Serve(unittest.TestCase):
+    """mlx-lm keeps the process alive after its generation thread dies, so a live pid can
+    sit next to an unreachable health. start() must treat that as down and restart."""
+
+    def test_start_restarts_a_live_but_unhealthy_process(self):
+        from unittest import mock
+        calls = []
+        with mock.patch.object(serve, "pid", lambda cfg: 1344), \
+                mock.patch.object(serve, "healthy", lambda cfg: False), \
+                mock.patch.object(serve, "stop", lambda cfg: calls.append("stop")), \
+                mock.patch.object(serve.shutil, "which", lambda e: None), \
+                self.assertRaises(SystemExit):  # which() returns None -> exits after the stop
+            serve.start({})
+        self.assertEqual(calls, ["stop"])  # the zombie was cleared before (re)starting
+
+    def test_start_is_a_noop_when_already_healthy(self):
+        from unittest import mock
+        with mock.patch.object(serve, "pid", lambda cfg: 1344), \
+                mock.patch.object(serve, "healthy", lambda cfg: True), \
+                mock.patch.object(serve, "stop", lambda cfg: self.fail("must not stop a healthy server")):
+            serve.start({})  # returns early, no exception
+
+
 if __name__ == "__main__":
     unittest.main()

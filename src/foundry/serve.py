@@ -50,9 +50,13 @@ def healthy(cfg) -> bool:
 
 
 def start(cfg) -> None:
-    if pid(cfg):
-        print(f"server already running (pid {pid(cfg)})")
+    p = pid(cfg)
+    if p and healthy(cfg):
+        print(f"server already running (pid {p})")
         return
+    if p:  # process is alive but not serving (crashed generation thread): clear it first
+        print(f"server process (pid {p}) is alive but not serving — restarting it")
+        stop(cfg)
     exe = shutil.which("mlx_lm.server")
     if not exe:
         sys.exit("mlx_lm.server not found — see README (uv tool install mlx-lm)")
@@ -168,7 +172,14 @@ def status(cfg) -> int:
     p = pid(cfg)
     print(f"process : {'pid ' + str(p) if p else 'not running'}")
     h = healthy(cfg)
-    print(f"health  : {'ok' if h else 'unreachable'}")
+    if p and not h:
+        # mlx-lm keeps the process alive after its generation thread dies (e.g. Metal
+        # OOM), answering 404/503 forever. A live pid next to an unreachable health is
+        # that zombie: say so plainly, and point at the fix.
+        print("health  : unreachable (process alive but not serving — likely a crashed")
+        print("          generation thread; run `foundry serve restart`)")
+    else:
+        print(f"health  : {'ok' if h else 'unreachable'}")
     if not h:
         return 1
     with urllib.request.urlopen(config.base_url(cfg) + "/models", timeout=5) as r:
