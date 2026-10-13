@@ -7,22 +7,19 @@ state = "~/.foundry"               # logs, pid files, run state, deploy keys, me
 
 [model]
 # Any MLX model on Hugging Face (or a local path). Swap models here, then `foundry serve restart`.
-id = "lmstudio-community/Qwen3.8-27B-MLX-4bit"
-context = 65536                    # tokens OpenCode may use before it summarises the session (model
-                                   # supports 262144). Measured 2026-10-08: sessions growing to 100-124k
-                                   # decoded at 6-9 tok/s instead of 15-17, and their ~8 GB KV cache (64 KB
-                                   # per token) ran the GPU out of memory next to the model, prompt cache
-                                   # and Docker. 64k keeps steps fast and memory safe.
+id = "mlx-community/Devstral-Small-2-24B-Instruct-2512-4bit"
+context = 65536                    # tokens OpenCode may use before it summarises the session (Devstral
+                                   # supports 131072). 64k keeps steps fast and the KV cache small enough
+                                   # to sit alongside the model (~15 GB), prompt cache and Docker on 48 GB.
 max_output = 8192                  # max tokens per response; caps runaway generations, which
                                    # can also crash mlx-lm (Metal buffer-count limit, mlx-lm#1662)
-thinking = false                   # Qwen thinking mode. See README: on this hardware, off works better
+thinking = false                   # Devstral has no thinking mode; the template ignores this flag
 
-# Sampling. Qwen3.8 recommends these for non-thinking mode; for thinking=true use
-# temperature=1.0, top_p=0.95.
+# Sampling. Mistral recommends temperature 0.15 for Devstral (agentic coding); top_k/min_p off.
 [model.sampling]
-temperature = 0.7
-top_p = 0.8
-top_k = 20
+temperature = 0.15
+top_p = 1.0
+top_k = 0
 min_p = 0.0
 
 [server]
