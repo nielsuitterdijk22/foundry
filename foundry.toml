@@ -8,9 +8,11 @@ state = "~/.foundry"               # logs, pid files, run state, deploy keys, me
 [model]
 # Any MLX model on Hugging Face (or a local path). Swap models here, then `foundry serve restart`.
 id = "mlx-community/Devstral-Small-2-24B-Instruct-2512-4bit"
-context = 65536                    # tokens OpenCode may use before it summarises the session (Devstral
-                                   # supports 131072). 64k keeps steps fast and the KV cache small enough
-                                   # to sit alongside the model (~15 GB), prompt cache and Docker on 48 GB.
+context = 40960                    # tokens OpenCode may use before it summarises the session (Devstral
+                                   # supports 131072). Was 64k, but a single near-64k generation's KV cache
+                                   # on top of the model (~15 GB), prompt cache and Docker kept OOMing the
+                                   # Metal command buffer on 48 GB (crashes every ~2h). 40k caps the live KV
+                                   # for headroom; OpenCode summarises a little sooner.
 max_output = 8192                  # max tokens per response; caps runaway generations, which
                                    # can also crash mlx-lm (Metal buffer-count limit, mlx-lm#1662)
 thinking = false                   # Devstral has no thinking mode; the template ignores this flag
