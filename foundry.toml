@@ -14,6 +14,10 @@ context = 65536                    # tokens OpenCode may use before it summarise
 max_output = 8192                  # max tokens per response; caps runaway generations, which
                                    # can also crash mlx-lm (Metal buffer-count limit, mlx-lm#1662)
 thinking = false                   # Devstral has no thinking mode; the template ignores this flag
+# Override the model's built-in chat template (Jinja file, path relative to the repo root).
+# Empty = use the model's own. Devstral's stock template raises "roles must alternate" on the
+# non-alternating histories OpenCode sends; this copy drops that guard, keeping tool calling.
+chat_template = "src/foundry/chat_templates/devstral-lenient.jinja"
 
 # Sampling. Mistral recommends temperature 0.15 for Devstral (agentic coding); top_k/min_p off.
 [model.sampling]

@@ -981,6 +981,18 @@ class Serve(unittest.TestCase):
                 mock.patch.object(serve, "stop", lambda cfg: self.fail("must not stop a healthy server")):
             serve.start({})  # returns early, no exception
 
+    def test_chat_template_arg_off_by_default(self):
+        self.assertEqual(serve._chat_template_arg({}), [])
+        self.assertEqual(serve._chat_template_arg({"chat_template": ""}), [])
+
+    def test_chat_template_arg_reads_the_file(self):
+        arg = serve._chat_template_arg({"chat_template": "src/foundry/chat_templates/devstral-lenient.jinja"})
+        self.assertEqual(arg[0], "--chat-template")
+        # the whole point: the lenient copy keeps tool calling but drops the alternation guard
+        self.assertIn("[TOOL_CALLS]", arg[1])
+        self.assertNotIn("ns.index", arg[1])  # the alternation counter/guard is gone
+        self.assertNotIn("raise_exception('After", arg[1])
+
 
 if __name__ == "__main__":
     unittest.main()

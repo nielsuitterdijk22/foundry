@@ -8,8 +8,22 @@ import subprocess
 import sys
 import time
 import urllib.request
+from pathlib import Path
 
 from . import config, llm
+
+
+def _chat_template_arg(m) -> list[str]:
+    """`--chat-template <jinja>` when model.chat_template names a file, else nothing.
+    Lets us ship a lenient template (e.g. for Devstral, whose stock one rejects the
+    non-alternating role sequences OpenCode sends). Path is relative to the repo root."""
+    rel = m.get("chat_template", "")
+    if not rel:
+        return []
+    path = Path(rel).expanduser()
+    if not path.is_absolute():
+        path = config.ROOT / path
+    return ["--chat-template", path.read_text()]
 
 
 def _pidfile(cfg):
@@ -70,6 +84,7 @@ def start(cfg) -> None:
         "--top-k", str(m["sampling"]["top_k"]),
         "--min-p", str(m["sampling"]["min_p"]),
         "--chat-template-args", json.dumps({"enable_thinking": m["thinking"]}),
+        *_chat_template_arg(m),
         *s["extra_args"],
     ]
     log = open(_logfile(cfg), "a")
