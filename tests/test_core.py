@@ -871,6 +871,13 @@ class Interview(unittest.TestCase):
         self.assertEqual((kind, mission, summary), ("mission", "A. B.", {"users": "x"}))
         self.assertEqual(scaffold._classify('MISSION\n{"mission": "A.'), ("bad", None))
 
+    def test_same_question_catches_a_re_ask(self):
+        q = "What is the exact URL or endpoint where the bot is hosted?"
+        self.assertTrue(scaffold._same_question(q, q))                                    # verbatim repeat
+        self.assertTrue(scaffold._same_question("  What   is this? ", "What is this?"))   # just whitespace/case
+        self.assertTrue(scaffold._same_question(q.upper(), q))
+        self.assertFalse(scaffold._same_question("Who uses this and what do they do daily?", q))
+
     def test_normalize_drops_failed_proposals(self):
         q = '{"action": "ask", "question": "Shared instance?"}'
         msgs = [{"role": "user", "content": "Start the interview."}, {"role": "assistant", "content": q},

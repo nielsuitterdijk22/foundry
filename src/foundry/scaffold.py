@@ -5,6 +5,7 @@ Progress is saved after every step to ~/.foundry/scaffold/<name>.json, so you ca
 quit (/quit) and rerun the same command to resume.
 """
 
+import difflib
 import json
 import os
 import shlex
@@ -249,6 +250,8 @@ class QuestionPrinter(ui.StreamPrinter):
 
 
 BAD_PROPOSAL = "That proposal was not valid."
+DONE_NUDGE = ("The owner wants to wrap up. Propose the mission now from what you have; "
+              "write 'TBD' where an answer is missing.")
 
 
 def _json_error(text: str) -> str:
@@ -277,6 +280,13 @@ def _classify(text: str):
     if isinstance(reply, dict) and isinstance(reply.get("question"), str):
         return "question", reply["question"]
     return "bad", None
+
+
+def _same_question(a: str, b: str) -> bool:
+    """True when two questions differ only in wording — the model re-asking what was answered."""
+    norm = lambda s: " ".join(s.lower().split())
+    a, b = norm(a), norm(b)
+    return a == b or difflib.SequenceMatcher(None, a, b).ratio() > 0.9
 
 
 def _normalize(msgs: list[dict]) -> list[dict]:
@@ -481,6 +491,7 @@ def interview(cfg, s: Session, system: str, title: str, key: str = "mission_md",
     if pending:
         say(f"(resuming — {sum(m['role'] == 'user' for m in msgs) - 1} answers so far)", "dim")
     bad = 0
+    last_q, stall = None, 0
     while True:
         print()
         if pending:  # resumed on an unanswered question: show it again
@@ -496,8 +507,23 @@ def interview(cfg, s: Session, system: str, title: str, key: str = "mission_md",
         kind, val = _classify(text)
         if kind == "question":
             bad = 0
+            stall = stall + 1 if last_q and _same_question(val, last_q) else 0
+            last_q = val
             msgs[-1] = {"role": "assistant", "content": val}
             s["transcript"] = msgs
+            if stall >= 4:  # ignored even the wrap-up nudge: hand control back to the owner
+                say("(the model won't move past this question — answer it, nudge it, or /done to force a proposal)", "w")
+            elif stall == 3:  # kept re-asking even after the first nudge: tell it to propose now
+                say("(the model is stuck on one question — wrapping up with what we have)", "w")
+                msgs.append({"role": "user", "content": DONE_NUDGE})
+                s["transcript"] = msgs
+                continue
+            elif stall == 2:  # asked the same thing a third time, after an answer each time
+                say("(the model keeps re-asking something you answered — nudging it on)", "w")
+                msgs.append({"role": "user", "content": "You already asked that and the owner answered it. "
+                             "Do not repeat it. Ask a different, concrete question, or propose the mission now."})
+                s["transcript"] = msgs
+                continue
             if not shown:
                 say(val, "q")
         elif kind == "bad":
@@ -534,8 +560,7 @@ def interview(cfg, s: Session, system: str, title: str, key: str = "mission_md",
         if ans == "/quit":
             raise KeyboardInterrupt
         if ans == "/done":
-            ans = ("The owner wants to wrap up. Propose the mission now from what you have; "
-                   "write 'TBD' where an answer is missing.")
+            ans = DONE_NUDGE
         msgs.append({"role": "user", "content": ans or "(no answer — move on)"})
         s["transcript"] = msgs  # saved before the model replies, so quitting never loses it
 
