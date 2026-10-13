@@ -128,6 +128,22 @@ class GitRepo(unittest.TestCase):
         self.assertTrue(lp._has_wip("foundry/T-001"))
         self.assertEqual(lp._state()["attempt"], 0)  # not counted
 
+    def test_preflight_recovers_a_repo_left_on_a_task_branch(self):
+        from unittest import mock
+        lp = self.loop()
+        lp._ensure_gitignore = lambda: None  # commits and pushes main: not what this is about
+        lp._start_branch("foundry/T-003")
+        (self.repo / "half.go").write_text("package a\n")  # a crash left work and the branch checked out
+        env = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+        with mock.patch.object(run.serve, "ensure", lambda cfg: None), \
+                mock.patch.object(run.sandbox, "ensure_proxy", lambda cfg: None), \
+                mock.patch.object(run.sandbox, "ensure_postgres", lambda repo: None), mock.patch.dict("os.environ", env):
+            lp._preflight()
+        self.assertEqual(git.git(self.repo, "rev-parse", "--abbrev-ref", "HEAD"), "main")
+        self.assertTrue(lp._has_wip("foundry/T-003"))
+        sh(self.repo, "git", "checkout", "-q", "foundry/T-003")
+        self.assertTrue((self.repo / "half.go").exists())
+
     def test_remote_op_gives_up_instead_of_hanging(self):
         from unittest import mock
         sh(self.repo, "git", "remote", "add", "origin", str(self.repo / "nowhere.git"))
@@ -655,33 +671,47 @@ class Agent(unittest.TestCase):
             self.assertEqual(agent.changes(repo), {"a.go": [2, 1], "new.go": [2, 0]})
 
 
-    def session(self, calls):
-        """agent.run against a fake OpenCode that emits one step per (command, output)."""
+    def session(self, *legs):
+        """agent.run against a fake OpenCode: each leg (a start or a resume) emits one step per
+        (command, output) of its list; the last list repeats for any further legs."""
         from unittest import mock
-        events = []
-        for cmd, out in calls:
-            events += [{"type": "step_start", "part": {}},
-                       {"type": "tool_use", "part": {"tool": "bash", "state": {
-                           "status": "completed", "input": {"command": cmd}, "output": out}}},
-                       {"type": "step_finish", "part": {"tokens": {"input": 10, "output": 5}}}]
-        script = "import json\nfor e in " + repr(events) + ": print(json.dumps(e), flush=True)\n"
+        argvs = []
+
+        def fake(cfg, repo, cmd, name):
+            argvs.append(cmd)
+            events = []
+            for c, out in legs[min(len(argvs), len(legs)) - 1]:
+                events += [{"type": "step_start", "sessionID": "ses_1", "part": {}},
+                           {"type": "tool_use", "sessionID": "ses_1", "part": {"tool": "bash", "state": {
+                               "status": "completed", "input": {"command": c}, "output": out}}},
+                           {"type": "step_finish", "sessionID": "ses_1", "part": {"tokens": {"input": 10, "output": 5}}}]
+            return [sys.executable, "-c", "import json\nfor e in " + repr(events) + ": print(json.dumps(e), flush=True)\n"]
         with tempfile.TemporaryDirectory() as d:
             repo = Path(d)
             sh(repo, "git", "init", "-q", "-b", "main")
             cfg = {"model": {"context": 65536}}
-            with mock.patch.object(agent.sandbox, "run_cmd", lambda *a, **k: [sys.executable, "-c", script]), \
+            with mock.patch.object(agent.sandbox, "run_cmd", fake), \
                     mock.patch.object(agent.sandbox, "kill", lambda name: None):
-                return agent.run(cfg, repo, "task", name="t", log=repo / "log.jsonl", timeout_min=5,
-                                 token_budget=10**9)
+                res = agent.run(cfg, repo, "task", name="t", log=repo / "log.jsonl", timeout_min=5,
+                                token_budget=10**9)
+        return res, argvs
 
-    def test_a_repetition_loop_stops_the_session(self):
-        res = self.session([("ls", "a")] + [("grep -rn plan migrations", "x.sql:3: plan")] * 6)
-        self.assertEqual(res.stopped, "looping")
+    LOOP = [("ls", "a")] + [("grep -rn plan migrations", "x.sql:3: plan")] * 6
+
+    def test_a_loop_is_corrected_in_the_same_session(self):
+        res, argvs = self.session(self.LOOP, [("edit", "ok"), ("go test ./...", "ok")])
+        self.assertEqual((res.stopped, res.nudges), ("", 1))
+        self.assertEqual(argvs[1][-3:-1], ["--session", "ses_1"])
+        self.assertIn("stuck in a loop", argvs[1][-1])
+
+    def test_a_loop_that_survives_the_corrections_stops_the_session(self):
+        res, argvs = self.session(self.LOOP)
+        self.assertEqual((res.stopped, res.nudges, len(argvs)), ("looping", agent.NUDGES, agent.NUDGES + 1))
         self.assertIn("grep -rn plan migrations", res.looped_on)
 
     def test_retesting_after_edits_is_not_a_loop(self):
-        res = self.session([("go test ./...", f"FAIL: {i} left") for i in range(6)])
-        self.assertEqual(res.stopped, "")
+        res, argvs = self.session([("go test ./...", f"FAIL: {i} left") for i in range(6)])
+        self.assertEqual((res.stopped, len(argvs)), ("", 1))
 
     def test_output_rate_spans_whole_steps(self):
         a = view.Attempt(pin="x", start=time.time() - 10)

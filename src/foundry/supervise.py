@@ -14,7 +14,7 @@ import sys
 import time
 from datetime import datetime
 
-from . import config
+from . import agent, config
 
 CRASH_BACKOFF = [60, 120, 300, 900]  # seconds after the 1st, 2nd, 3rd, later consecutive crashes
 IDLE_RETRY = 20 * 60                 # after a clean stop
@@ -57,6 +57,7 @@ def main(cfg: dict, args: list[str]) -> int:
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
 
+    agent.keep_awake()  # the runs do too, but between them (backoff, idle retry) the Mac would sleep
     say(f"[supervise] watching suite {suite} (log: {log_path})")
     waiting = False
     while True:

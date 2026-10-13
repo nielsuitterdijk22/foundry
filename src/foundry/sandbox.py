@@ -120,6 +120,9 @@ def run_cmd(cfg: dict, repo: Path, cmd: list[str], *, name: str,
         "npm_config_proxy": proxy, "npm_config_https_proxy": proxy,
         "OPENCODE_CONFIG_CONTENT": opencode_config(cfg),
         **database_env(repo),
+        # OpenCode keeps its sessions under XDG_DATA_HOME: on the repo's cache volume they outlive the
+        # container, so an interrupted session can be resumed (opencode run --session).
+        "XDG_DATA_HOME": "/cache/xdg-data",
     }
     argv = ["docker", "run", "--rm", "--name", name, "--init",
             "--network", NETWORK,

@@ -210,7 +210,13 @@ class Loop:
             print(f"[foundry] recovering from interrupted attempt on {st['task']}")
             self._abort_attempt(count=True)
         branch = git.git(self.repo, "rev-parse", "--abbrev-ref", "HEAD")
-        if branch != self.main:
+        if branch.startswith("foundry/"):  # a crash between attempt and cleanup: keep its work, back to main
+            print(f"[foundry] {self.name} was left on {branch}; keeping its work there and returning to {self.main}")
+            if git.dirty(self.repo):
+                git.git(self.repo, "add", "-A")
+                git.git(self.repo, "commit", "-qm", f"WIP {branch.removeprefix('foundry/')}: recovered after a crash")
+            self._reset_to_main()
+        elif branch != self.main:
             raise Stop(f"{self.name} is on branch {branch}; switch to {self.main} first")
         self._ensure_gitignore()
 
@@ -405,7 +411,7 @@ class Loop:
 
         metric = dict(task=task.id, title=task.title, attempt=n, tokens_in=res.tokens_in,
                       tokens_out=res.tokens_out, tokens_cached=res.tokens_cached,
-                      seconds=round(res.seconds), steps=res.steps, out_tok_s=round(res.out_tok_s, 1),
+                      seconds=round(res.seconds), steps=res.steps, out_tok_s=round(res.out_tok_s, 1), nudges=res.nudges,
                       flagged=verdict.flagged, questions=_section(summary, "Questions"),
                       followups=_section(summary, "Follow-ups"), done=_section(summary, "Done")[:1500],
                       **demo)
@@ -433,8 +439,9 @@ class Loop:
                         git.git(self.repo, "checkout", self.main, "--", path)
                     else:
                         (self.repo / path).unlink(missing_ok=True)
-                git.git(self.repo, "add", "-A")
-                git.git(self.repo, "commit", "-qm", f"WIP {task.id}: attempt {n}: {failure}"[:200])
+                if git.dirty(self.repo):  # nothing new when this attempt only re-ran kept work
+                    git.git(self.repo, "add", "-A")
+                    git.git(self.repo, "commit", "-qm", f"WIP {task.id}: attempt {n}: {failure}"[:200])
                 self._reset_to_main()
                 print(f"[foundry] {tag}: partial work kept on {st['branch']}", flush=True)
             else:
