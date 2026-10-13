@@ -25,7 +25,10 @@ min_p = 0.0
 [server]
 host = "127.0.0.1"
 port = 8080
-prompt_cache_bytes = 8_000_000_000 # caps the server's prompt KV cache (prevents Metal OOM)
+prompt_cache_bytes = 6_000_000_000 # caps the server's prompt KV cache (prevents Metal OOM).
+                                   # Was 8 GB; cut to leave GPU headroom — the 24B 4-bit model
+                                   # (~15 GB) + KV for a 64k context + Docker (6 GB) was OOMing
+                                   # the Metal command buffer mid-generation on 48 GB.
 startup_timeout = 600              # seconds to wait for the model to load
 extra_args = []                    # passed verbatim to mlx_lm.server
 
