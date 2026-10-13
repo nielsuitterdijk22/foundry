@@ -98,15 +98,29 @@ class Fatal(Stop):
 
 def unmet(cfg: dict, repo: Path, task: backlog.Task) -> list[str]:
     """The task's Needs (T-NNN in this repo, Product/T-NNN in another) that aren't Done yet.
-    A reference to a repo foundry doesn't manage is ignored rather than blocking forever."""
+    A reference to a repo foundry doesn't manage is ignored rather than blocking forever; so is a
+    task the CTO dropped, and one it split stands for its replacements (never the task itself)."""
     out = []
     for name, tid in re.findall(r"(?:([\w.-]+)/)?(T-\d+)", task.field("Needs")):
         other = config.repo_path(cfg, name) if name else repo
         if not (other / "BACKLOG.md").exists():
             continue
-        if tid not in {t.id for t in backlog.load(other).sections["Done"]}:
-            out.append(f"{name}/{tid}" if name else tid)
+        me = task.id if other.resolve() == repo.resolve() else ""
+        out += [f"{name}/{x}" if name else x for x in _open(backlog.load(other), tid, me, set())]
     return out
+
+
+def _open(bl: backlog.Backlog, tid: str, me: str, seen: set) -> list[str]:
+    if tid == me or tid in seen or tid in {t.id for t in bl.sections["Done"]}:
+        return []
+    seen.add(tid)
+    t = next((t for t in bl.sections["Parked"] if t.id == tid), None)
+    cto = [ln for ln in (t.body.splitlines() if t else []) if ln.startswith("- CTO (")]
+    if any("dropped" in ln for ln in cto):
+        return []
+    if by := next((m.group(1) for ln in cto if (m := re.search(r"superseded by ([^(\n]*)", ln))), None):
+        return [x for new in re.findall(r"T-\d+", by) for x in _open(bl, new, me, seen)]
+    return [tid]
 
 
 def main(cfg: dict, args: list[str]) -> int:

@@ -38,6 +38,10 @@ class AgentResult:
 # The same call with the same result 5 times within 10 calls: the model is stuck in a loop. (The
 # result counts too: edit-and-retest cycles repeat the test command, but its output changes.)
 LOOP_WINDOW, LOOP_REPEATS = 10, 5
+# The very same edit made 3 times within 30 calls: it is flipping code back and forth between two
+# versions (each retest fails differently, so the check above never sees a repeat).
+EDIT_WINDOW, EDIT_REPEATS = 30, 3
+EDITS = ("edit", "write", "patch", "multiedit")
 
 
 def _call(part: dict) -> str:
@@ -78,6 +82,9 @@ NUDGES = 2  # times a session is interrupted and resumed with a correction befor
 LOOP_NUDGE = ("You just ran the same command {n} times and got the same result: you are stuck in a loop. "
               "Stop searching. In one or two sentences say what you know, update .foundry/notes.md, then make "
               "the first concrete change for the task now (a migration, a function, a test).")
+FLIP_NUDGE = ("You have now made this exact edit {n} times: you are flipping the code back and forth between two "
+              "versions, and each fails a different test. Stop editing. Run the failing tests once, write in "
+              ".foundry/notes.md why each version fails, then make one change that satisfies both.")
 STALL_NUDGE = ("You have explored for {m} minutes without changing a single file. You know enough to start. "
                "Write a short plan in .foundry/notes.md, then make the first concrete edit for the task now; "
                "look things up only as the edit needs them.")
@@ -145,6 +152,7 @@ def run(cfg: dict, repo: Path, prompt: str, *, name: str, log: Path,
     status = ui.Status(label, panel=a.panel)
     looked: list[dict] = []  # consecutive reads/greps, printed as one line
     recent: list[str] = []   # the last LOOP_WINDOW tool calls, to catch a repetition loop
+    edits: list[str] = []    # the last EDIT_WINDOW calls, edits only by name, to catch flip-flopping
     session = ""
 
     def flush_looked():
@@ -189,14 +197,20 @@ def run(cfg: dict, repo: Path, prompt: str, *, name: str, log: Path,
                             stop("tokens")
                     elif kind == "tool_use":
                         recent = (recent + [_call_key(part)])[-LOOP_WINDOW:]
-                        if recent.count(recent[-1]) >= LOOP_REPEATS and not res.stopped and not nudge["msg"]:
+                        edits = (edits + [_call(part) if part.get("tool") in EDITS else ""])[-EDIT_WINDOW:]
+                        loop = recent.count(recent[-1]) >= LOOP_REPEATS
+                        flip = bool(edits[-1]) and edits.count(edits[-1]) >= EDIT_REPEATS
+                        if (loop or flip) and not res.stopped and not nudge["msg"]:
                             flush_looked()
                             res.looped_on = _clip(_call(part), 300)
                             last = nudge["used"] >= NUDGES
-                            status.print(view.red(f"  ! repeating the same call ({_clip(_call(part), 80)}) — "
+                            status.print(view.red(f"  ! {'repeating the same call' if loop else 'making the same edit again'}"
+                                                  f" ({_clip(_call(part), 80)}) — "
                                                   + ("stopping" if last else "interrupting it")))
-                            correct(LOOP_NUDGE.format(n=recent.count(recent[-1])), "looping")
+                            correct(LOOP_NUDGE.format(n=recent.count(recent[-1])) if loop
+                                    else FLIP_NUDGE.format(n=edits.count(edits[-1])), "looping")
                             recent.clear()
+                            edits.clear()
                         line = a.tool(part)
                         if view.quiet(part):
                             looked.append(part)

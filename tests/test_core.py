@@ -257,6 +257,23 @@ class Suite(unittest.TestCase):
         self.assertEqual(run.unmet(self.cfg, self.root / "Tempo", tempo[1]), ["T-001"])
         self.assertEqual(run.unmet(self.cfg, self.root / "Tempo", tempo[3]), [])  # unmanaged repo: ignored
 
+    def test_split_or_dropped_tasks_do_not_block(self):
+        bl = backlog.Backlog()
+        bl.sections["Todo"] = backlog.from_items([{"title": "Subscriber", "needs": ["Forge/T-001"]},
+                                                  {"title": "OIDC", "needs": ["T-010"]},
+                                                  {"title": "CLI", "needs": ["T-013"]},
+                                                  {"title": "Later", "needs": ["T-020"]}])
+        for t, tid in zip(bl.todo, ["T-013", "T-018", "T-016", "T-021"], strict=True):
+            t.id = tid
+        bl.sections["Parked"] = [backlog.Task("T-001", "NATS", "- CTO (2026-10-12): superseded by T-012, T-013 (x)\n"),
+                                 backlog.Task("T-010", "SSO", "- CTO (2026-10-13): superseded by T-018\n"),
+                                 backlog.Task("T-020", "Old", "- CTO (2026-10-13): dropped — obsolete\n")]
+        bl.sections["Done"] = [backlog.Task("T-012", "client")]
+        (self.root / "Forge").mkdir()
+        backlog.save(self.root / "Forge", bl)
+        todo = backlog.load(self.root / "Forge").todo
+        self.assertEqual([run.unmet(self.cfg, self.root / "Forge", t) for t in todo], [[], [], ["T-013"], []])
+
     def test_next_task_skips_waiting_and_blocks_when_all_wait(self):
         self.write("Quill", [{"title": "Auth API"}])
         self.write("Tempo", [{"title": "Use auth", "needs": ["Quill/T-001"]}, {"title": "Free"}])
@@ -520,7 +537,7 @@ class Inbox(unittest.TestCase):
         backlog.save(quill.repo, bl)
         reply = {"decision": "act", "why": "split", "actions": [
             {"kind": "task", "product": "Quill", "title": "Step one", "position": "top"},
-            {"kind": "task", "product": "Quill", "title": "Step two", "position": "top"},
+            {"kind": "task", "product": "Quill", "title": "Step two", "position": "top", "needs": ["Quill/T-001", "T-010"]},
             {"kind": "task", "product": "Quill", "title": "Step three", "position": "top"},
             {"kind": "rework", "product": "Quill", "task": "T-001", "guidance": "Remove this task."},
             {"kind": "retire", "product": "Quill", "task": "T-001", "why": "replaced"}]}
@@ -531,6 +548,7 @@ class Inbox(unittest.TestCase):
         self.assertEqual([t.id for t in bl.sections["Parked"]], ["T-001"])
         self.assertIn("superseded by", bl.sections["Parked"][0].body)
         self.assertEqual(bl.todo[3].field("Needs"), "T-012")  # needs the last step, not nothing
+        self.assertEqual(bl.todo[1].field("Needs"), "T-010")  # a replacement never needs the task it replaces
 
     def test_rework_then_escalate_after_two_fixes(self):
         from unittest import mock
@@ -681,9 +699,10 @@ class Agent(unittest.TestCase):
             argvs.append(cmd)
             events = []
             for c, out in legs[min(len(argvs), len(legs)) - 1]:
+                tool, inp = ("edit", c) if isinstance(c, dict) else ("bash", {"command": c})
                 events += [{"type": "step_start", "sessionID": "ses_1", "part": {}},
-                           {"type": "tool_use", "sessionID": "ses_1", "part": {"tool": "bash", "state": {
-                               "status": "completed", "input": {"command": c}, "output": out}}},
+                           {"type": "tool_use", "sessionID": "ses_1", "part": {"tool": tool, "state": {
+                               "status": "completed", "input": inp, "output": out}}},
                            {"type": "step_finish", "sessionID": "ses_1", "part": {"tokens": {"input": 10, "output": 5}}}]
             return [sys.executable, "-c", "import json\nfor e in " + repr(events) + ": print(json.dumps(e), flush=True)\n"]
         with tempfile.TemporaryDirectory() as d:
@@ -712,6 +731,14 @@ class Agent(unittest.TestCase):
     def test_retesting_after_edits_is_not_a_loop(self):
         res, argvs = self.session([("go test ./...", f"FAIL: {i} left") for i in range(6)])
         self.assertEqual((res.stopped, len(argvs)), ("", 1))
+
+    def test_flipping_an_edit_back_and_forth_is_a_loop(self):
+        a = {"filePath": "x.go", "oldString": "v1", "newString": "v2"}
+        b = {"filePath": "x.go", "oldString": "v2", "newString": "v1"}
+        flips = [(a, "ok"), ("go test", "FAIL 1"), (b, "ok"), ("go test", "FAIL 2")] * 3
+        res, argvs = self.session(flips, [("go test", "ok")])
+        self.assertEqual((res.stopped, res.nudges), ("", 1))
+        self.assertIn("flipping the code back and forth", argvs[1][-1])
 
     def test_output_rate_spans_whole_steps(self):
         a = view.Attempt(pin="x", start=time.time() - 10)

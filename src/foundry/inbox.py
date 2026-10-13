@@ -444,7 +444,7 @@ class Inbox:
                 did.append(f"{home.repo.name}/{t.id} {note}")
             if new:
                 for lp in self.loops:
-                    if _rewire(lp.repo, home.repo.name, item["task"], new[-1], same=lp is home):
+                    if _rewire(lp.repo, home.repo.name, item["task"], new[-1], same=lp is home, replacements=new):
                         touched[lp].add("BACKLOG.md")
         what = {"thought": "owner thought", "question": "answers a question", "stuck": "unsticks"}[kind]
         for lp, paths in touched.items():
@@ -502,22 +502,22 @@ def _cto_lines(t: backlog.Task) -> list[str]:
     return [ln for ln in t.body.splitlines() if ln.startswith("- CTO (")]
 
 
-def _rewire(repo, product: str, old: str, new: str | None, same: bool) -> bool:
+def _rewire(repo, product: str, old: str, new: str | None, same: bool, replacements=()) -> bool:
     """Tasks that needed `old` (replaced by a split) now need `new`, its last replacement;
-    with `new` None (`old` was dropped) they stop needing it."""
+    with `new` None (`old` was dropped) they stop needing it, and so do its `replacements`."""
     bl = backlog.load(repo)
-    ref = rf"(?<![\w/-]){old}\b" if same else rf"\b{re.escape(product)}/{old}\b"
-    sub = (new if same else f"{product}/{new}") if new else ""
+    ref = rf"(?<![\w/-])(?:{re.escape(product)}/)?{old}\b" if same else rf"\b{re.escape(product)}/{old}\b"
 
-    def fix(m):
+    def fix(m, sub):
         line = re.sub(ref, sub, m.group(1))
-        if new is None:  # tidy the list: "- Needs: T-1, , T-3" → "- Needs: T-1, T-3"; nothing left → no line
-            items = [x.strip() for x in line.split(":", 1)[1].split(",") if x.strip()]
-            line = f"{line.split(':', 1)[0]}: {', '.join(items)}" if items else ""
-        return line
+        # tidy the list: "- Needs: T-1, , T-3" → "- Needs: T-1, T-3"; nothing left → no line
+        items = [x.strip() for x in line.split(":", 1)[1].split(",") if x.strip()]
+        return f"{line.split(':', 1)[0]}: {', '.join(items)}" if items else ""
     changed = False
     for t in bl.todo + bl.sections["Parked"]:
-        body = re.sub(r"^(- Needs:.*)$\n?", lambda m: (fix(m) + "\n") if fix(m) else "", t.body, flags=re.M | re.I)
+        sub = "" if not new or (same and t.id in replacements) else new if same else f"{product}/{new}"
+        body = re.sub(r"^(- Needs:.*)$\n?", lambda m, sub=sub: (fix(m, sub) + "\n") if fix(m, sub) else "",
+                      t.body, flags=re.M | re.I)
         if body != t.body:
             t.body, changed = body, True
     if changed:
